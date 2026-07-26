@@ -1,3 +1,8 @@
 node_modules/
 *.log
 .DS_Store
+
+# Belt and braces: the real config lives in ~/.config/scelo-tui, but
+# SCELO_TUI_CONFIG can point anywhere, and that file holds API keys.
+config.json
+*.key

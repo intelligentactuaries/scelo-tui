@@ -17,6 +17,7 @@
 import { type ColumnMeta, type Dataset, summariseDataset } from "@scelo/core";
 import { type AutoCleanResult, autoCleanDataset } from "../core/cleaning";
 import { loadDataset } from "../core/ingest";
+import { MODELS, type ModelChoice, type ModelResult } from "./analyses";
 import { complete, llmAvailable } from "./llm";
 
 export type StageId = "ingest" | "clean" | "read" | "pick" | "run";
@@ -28,25 +29,11 @@ export type StageEvent = {
   detail?: string;
 };
 
-/** A model the agent may choose. Deliberately a small fixed menu for the
- *  skeleton: the real catalog is ~30 entries and picking well from it is a
- *  separate problem from proving the pipeline runs. */
-export type ModelChoice = {
-  id: string;
-  label: string;
-  /** When this model is applicable at all, checked before the LLM sees it. */
-  applies: (metas: ColumnMeta[]) => boolean;
-  /** Runs headlessly and returns a small result table. */
-  run: (dataset: Dataset, metas: ColumnMeta[]) => ModelResult;
-};
-
-export type ModelResult = {
-  headline: string;
-  columns: string[];
-  rows: Array<Array<string | number>>;
-  /** Values for a terminal plot, when the model produces a series. */
-  series?: { label: string; values: number[] };
-};
+// The menu itself lives in analyses.ts — the export generators need it
+// without dragging in the pipeline. Re-exported so existing importers keep
+// one obvious place to look.
+export { MODELS };
+export type { ModelChoice, ModelResult };
 
 export type PipelineResult = {
   dataset: Dataset;
@@ -63,78 +50,20 @@ export type PipelineResult = {
   degraded: string | null;
 };
 
-function numericColumns(metas: ColumnMeta[]): ColumnMeta[] {
-  return metas.filter((m) => m.type === "number" && m.min !== undefined);
-}
-
-// ── the model menu ────────────────────────────────────────────────────────
-
-export const MODELS: ModelChoice[] = [
-  {
-    id: "numeric-summary",
-    label: "Descriptive summary",
-    applies: (m) => numericColumns(m).length > 0,
-    run: (_d, metas) => {
-      const nums = numericColumns(metas);
-      return {
-        headline: `${nums.length} numeric column${nums.length === 1 ? "" : "s"} described`,
-        columns: ["column", "n", "mean", "median", "p20", "p80", "min", "max"],
-        rows: nums.map((m) => [
-          m.name,
-          m.count - m.missing,
-          fmt(m.mean),
-          fmt(m.median),
-          fmt(m.quintiles?.[0]),
-          fmt(m.quintiles?.[3]),
-          fmt(m.min),
-          fmt(m.max),
-        ]),
-        series: nums[0]?.histogramBins
-          ? { label: `${nums[0].name} distribution`, values: nums[0].histogramBins }
-          : undefined,
-      };
-    },
-  },
-  {
-    id: "frequency",
-    label: "Frequency / exposure profile",
-    applies: (m) => m.some((x) => x.type === "string" && x.unique > 1 && x.unique <= 40),
-    run: (_d, metas) => {
-      const cat = metas
-        .filter((m) => m.type === "string" && m.unique > 1 && m.unique <= 40)
-        .sort((a, b) => a.unique - b.unique)[0];
-      const top = cat?.topValues ?? [];
-      const total = top.reduce((s, t) => s + t.count, 0) || 1;
-      return {
-        headline: `Exposure across \`${cat?.name ?? "?"}\` (${cat?.unique ?? 0} levels)`,
-        columns: ["level", "count", "share"],
-        rows: top.map((t) => [t.value, t.count, `${((100 * t.count) / total).toFixed(1)}%`]),
-        series: { label: `${cat?.name ?? ""} counts`, values: top.map((t) => t.count) },
-      };
-    },
-  },
-  {
-    id: "missingness",
-    label: "Missingness / data-quality audit",
-    applies: (m) => m.some((x) => x.missing > 0),
-    run: (_d, metas) => {
-      const withGaps = metas
-        .filter((m) => m.missing > 0)
-        .sort((a, b) => b.missing / b.count - a.missing / a.count);
-      return {
-        headline: `${withGaps.length} column${withGaps.length === 1 ? "" : "s"} with gaps`,
-        columns: ["column", "type", "missing", "%"],
-        rows: withGaps.map((m) => [
-          m.name,
-          m.type,
-          m.missing,
-          `${((100 * m.missing) / Math.max(1, m.count)).toFixed(1)}%`,
-        ]),
-        series: { label: "missing %", values: withGaps.map((m) => (100 * m.missing) / Math.max(1, m.count)) },
-      };
-    },
-  },
-];
+/**
+ * Hand the event loop back so the renderer can paint the stage we just
+ * announced, before we block on it.
+ *
+ * Ingest and clean are synchronous and CPU-bound — parsing 25MB and cleaning
+ * 120k rows to a fixed point holds the thread for seconds. Announcing a stage
+ * and starting it in the same turn means `onStage` never reaches the screen
+ * until the work is already done, so a run that is two seconds into reading a
+ * file still reads "waiting for data". The `await` costs one macrotask.
+ *
+ * It does not make those stages animate — nothing can, while they hold the
+ * thread. It makes the app say the true thing about what it is doing.
+ */
+const paint = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function fmt(n: number | undefined): string {
   if (n === undefined || !Number.isFinite(n)) return "—";
@@ -191,26 +120,38 @@ Choose only from the menu. Do not invent an analysis.`;
 
 // ── the pipeline ──────────────────────────────────────────────────────────
 
+/** What a run starts from: a path on disk, or a dataset already in memory —
+ *  the bundled samples arrive the second way, and everything after ingest
+ *  must not care which it was. */
+export type PipelineSource = string | { dataset: Dataset };
+
 export async function runPipeline(
-  path: string,
+  source: PipelineSource,
   onStage: (e: StageEvent) => void,
 ): Promise<{ ok: true; value: PipelineResult } | { ok: false; error: string }> {
   // 1 — ingest
   onStage({ stage: "ingest", state: "active" });
-  const loaded = await loadDataset(path);
-  if (!loaded.ok) {
-    onStage({ stage: "ingest", state: "failed", detail: loaded.error });
-    return { ok: false, error: loaded.error };
+  await paint();
+  let raw: Dataset;
+  if (typeof source === "string") {
+    const loaded = await loadDataset(source);
+    if (!loaded.ok) {
+      onStage({ stage: "ingest", state: "failed", detail: loaded.error });
+      return { ok: false, error: loaded.error };
+    }
+    raw = loaded.dataset;
+  } else {
+    raw = source.dataset;
   }
-  const raw = loaded.dataset;
   onStage({
     stage: "ingest",
     state: "done",
-    detail: `${raw.rows.length.toLocaleString()} rows x ${raw.columns.length} cols`,
+    detail: `${raw.rows.length.toLocaleString()} rows x ${raw.columns.length} cols${typeof source === "string" ? "" : " (sample)"}`,
   });
 
   // 2 — clean, to a fixed point
   onStage({ stage: "clean", state: "active" });
+  await paint();
   const clean = autoCleanDataset(raw, (d) => summariseDataset(d));
   const dataset = clean.dataset;
   const metas = summariseDataset(dataset);
@@ -231,6 +172,7 @@ export async function runPipeline(
 
   // 3 — read
   onStage({ stage: "read", state: haveLlm ? "active" : "skipped" });
+  await paint();
   let reading = "";
   if (haveLlm) {
     try {
@@ -251,6 +193,7 @@ export async function runPipeline(
   // 4 — pick a model. The menu is filtered by applicability FIRST, so the
   // model can only choose something that will actually run.
   onStage({ stage: "pick", state: "active" });
+  await paint();
   const eligible = MODELS.filter((m) => m.applies(metas));
   let chosen: ModelChoice | null = eligible[0] ?? null;
   let rationale = eligible.length > 0 ? "first applicable analysis for this shape" : "";
@@ -284,6 +227,7 @@ export async function runPipeline(
 
   // 5 — run
   onStage({ stage: "run", state: chosen ? "active" : "skipped" });
+  await paint();
   let result: ModelResult | null = null;
   if (chosen) {
     try {
