@@ -1,0 +1,24 @@
+{
+  "name": "scelo-tui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Experimental three-pane terminal workstation for Scelo. Drop data in, the agent does the rest.",
+  "bin": {
+    "scelo-tui": "./src/main.tsx"
+  },
+  "scripts": {
+    "dev": "bun run src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/react": "^19.2.17",
+    "typescript": "^7.0.2"
+  }
+}
