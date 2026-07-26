@@ -4,11 +4,25 @@
 // panes fill in as each stage lands. Chat does not trigger work — it changes
 // what the agent already decided.
 
+import { relative } from "node:path";
+import { SAMPLES, SAMPLE_BY_KEY, type ColumnMeta, type SampleKey, type SampleSpec } from "@scelo/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { useCallback, useRef, useState } from "react";
-import { MODEL, llmAvailable } from "./agent/llm";
-import { type PipelineResult, type StageEvent, type StageId, runPipeline } from "./agent/pipeline";
-import { ChatView, useChat } from "./ui/Chat";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MODELS, resolveChoice } from "./agent/analyses";
+import { activeLabel, llmAvailable } from "./agent/llm";
+import {
+  type PipelineResult,
+  type PipelineSource,
+  type StageEvent,
+  type StageId,
+  runPipeline,
+} from "./agent/pipeline";
+import { type ExportOutcome, type ExportTarget, exportArtifacts, parseTarget } from "./export";
+import { detectHost, hostLabel, performHandoff, performOpen, planFor } from "./export/handoff";
+import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
+import { COMMAND_NAMES, helpText } from "./ui/commands";
+import { isMouseReport, swallowingMouseBytes, useMouse } from "./ui/mouse";
+import { Spinner, Working } from "./ui/spinner";
 import { MIN_HEIGHT, MIN_WIDTH, theme } from "./ui/theme";
 import { BarPlot, Head, Pane, Prose, Table } from "./ui/widgets";
 
@@ -23,7 +37,37 @@ const STAGE_LABEL: Record<StageId, string> = {
   run: "run",
 };
 
-export function App({ initialPath }: { initialPath?: string }) {
+/** What the header says while a run is in flight. Naming the live stage
+ *  rather than cycling a decorative word means the animation carries real
+ *  information: a run parked on "understanding the data" for 40s is the model
+ *  being slow, which is a different problem from a stuck pipeline. */
+const STAGE_GERUND: Record<StageId, string> = {
+  ingest: "reading the file",
+  clean: "cleaning",
+  read: "understanding the data",
+  pick: "choosing an analysis",
+  run: "running the analysis",
+};
+
+function activeStageLabel(stages: Partial<Record<StageId, StageEvent>>): string {
+  for (const id of Object.keys(STAGE_LABEL) as StageId[]) {
+    if (stages[id]?.state === "active") return STAGE_GERUND[id];
+  }
+  return "working";
+}
+
+export function App({
+  initialPath,
+  onPath,
+  onSettings,
+}: {
+  initialPath?: string;
+  /** Reports the file that is loaded, so re-entering the picker and coming
+   *  back re-runs on it rather than landing on an empty screen. */
+  onPath?: (path: string) => void;
+  /** Back to the model picker. */
+  onSettings?: () => void;
+}) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
@@ -33,6 +77,7 @@ export function App({ initialPath }: { initialPath?: string }) {
   const [stages, setStages] = useState<Partial<Record<StageId, StageEvent>>>({});
   const [pipe, setPipe] = useState<PipelineResult | null>(null);
   const [running, setRunning] = useState(false);
+  const [runStart, setRunStart] = useState<number | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const started = useRef(false);
 
@@ -42,34 +87,296 @@ export function App({ initialPath }: { initialPath?: string }) {
   // full-width rule wrap onto a second line.
   const inner = paneW - 4;
 
+  // Click anywhere in a column to type there. Deliberately mapped on the
+  // column alone rather than on the pane's exact rectangle: the panes tile
+  // the width, so every click has an unambiguous answer, and clicking the
+  // header or the hint line under a pane does the thing you meant rather
+  // than nothing.
+  // The one click target that is not focus: the header's export tag. Row 1
+  // is the only row whose meaning is position-independent (Ink draws the
+  // header first), which is what makes it safe to bind an action to.
+  const exportClick = useRef<(() => void) | null>(null);
+  useMouse(
+    useCallback(
+      ({ column, row }: { column: number; row: number }) => {
+        if (row <= 1 && exportClick.current) {
+          exportClick.current();
+          return;
+        }
+        const i = Math.min(ORDER.length - 1, Math.max(0, Math.floor((column - 1) / paneW)));
+        setFocus(ORDER[i]);
+      },
+      [paneW],
+    ),
+  );
+  exportClick.current = pipe?.result ? () => doExport(undefined, active) : null;
+
   const start = useCallback(
-    async (path: string) => {
+    async (source: PipelineSource) => {
       if (running) return;
       setRunning(true);
+      setRunStart(Date.now());
       setStages({});
       setPipe(null);
       setBanner(null);
-      const r = await runPipeline(path, (e) =>
+      // Only a real path is worth remembering for the picker round-trip — a
+      // sample rebuilds from its key, and re-running it after a model switch
+      // is a fresh build anyway.
+      if (typeof source === "string") onPath?.(source);
+      const r = await runPipeline(source, (e) =>
         setStages((s) => ({ ...s, [e.stage]: e })),
       );
       setRunning(false);
+      setRunStart(null);
       if (!r.ok) setBanner(r.error);
       else setPipe(r.value);
     },
-    [running],
+    [running, onPath],
   );
 
-  // Auto-run a path given on the command line.
-  if (initialPath && !started.current) {
+  // Auto-run a path given on the command line — from an effect, not from
+  // render. `start` reports the path upward so re-entering the picker can
+  // come back to it, and a parent setState during a child's render is a
+  // React error, not a style preference.
+  useEffect(() => {
+    if (!initialPath || started.current) return;
     started.current = true;
     void start(initialPath);
-  }
+  }, [initialPath, start]);
+
+  // ── deterministic intents ───────────────────────────────────────────────
+  // Slash commands (and their unambiguous bare forms) are handled locally,
+  // never sent to the model. Two reasons: they are ACTIONS, and asking an
+  // LLM to maybe perform an action is how "export my work" becomes a
+  // paragraph about exporting; and they must keep working when the model is
+  // down — the app degrades to "no prose", never to "no controls".
+
+  const exporting = useRef(false);
+  // Detected once: the hosting terminal cannot change mid-process, and the
+  // detection probes PATH, which is not free.
+  const host = useRef(detectHost()).current;
+  // What /open resolves names against — the most recent export.
+  const lastExport = useRef<ExportOutcome | null>(null);
+
+  const doExport = useCallback(
+    (targets: ExportTarget[] | undefined, chat: ChatHandle) => {
+      if (!pipe) {
+        chat.say("nothing to export yet — drop a dataset in first");
+        return;
+      }
+      if (exporting.current) {
+        chat.say("an export is already running");
+        return;
+      }
+      exporting.current = true;
+      chat.say(targets?.length ? `exporting ${targets.join(", ")}…` : "exporting everything…");
+      // Let the line above paint before the synchronous file writes start.
+      setTimeout(() => {
+        try {
+          const plan = planFor(host);
+          const outcome = exportArtifacts(pipe, { targets, ...plan });
+          lastExport.current = outcome;
+          const rel = relative(process.cwd(), outcome.dir);
+          const where =
+            outcome.layout === "flat"
+              ? rel === ""
+                ? "into this directory"
+                : `into ${rel}/`
+              : `→ ${rel || outcome.dir}/`;
+          const hand = performHandoff(host, outcome);
+          const lines = [
+            `${outcome.files.length} file${outcome.files.length === 1 ? "" : "s"} ${where}`,
+            outcome.files.map((f) => f.name).join(" · "),
+          ];
+          if (hand.opened.length > 0) lines.push(`opened: ${hand.opened.join(" · ")}`);
+          if (hand.hint) lines.push(hand.hint);
+          if (host.kind === "plain") {
+            lines.push("open the .sce in the Scelo IDE; the scripts read the exported csv");
+          }
+          chat.say(lines.join("\n"));
+        } catch (e) {
+          chat.say(`export failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          exporting.current = false;
+        }
+      }, 0);
+    },
+    [pipe, host],
+  );
+
+  /** The bundled samples, as a list you arrow through. Built per-chat so
+   *  picking one can narrate into the pane it was picked from. */
+  const sampleChoices = useCallback(
+    (chat: ChatHandle): ChoiceList => ({
+      title: "the IDE's bundled samples",
+      items: SAMPLES.map((s, i) => ({
+        id: s.key,
+        label: `${i + 1}. ${s.title}`,
+        hint: `${s.rows}×${s.cols} · ${s.subtitle}`,
+      })),
+      onPick: (c) => {
+        const spec = SAMPLE_BY_KEY.get(c.id as SampleKey);
+        if (!spec) return;
+        if (running) {
+          chat.say("a run is already in progress — wait for it to finish");
+          return;
+        }
+        chat.say(`loading ${spec.title} (${spec.rows}×${spec.cols})`);
+        void start({ dataset: spec.build() });
+      },
+    }),
+    [start, running],
+  );
+
+  /** The analyses that apply to the loaded data, same widget. */
+  const analysisChoices = useCallback(
+    (chat: ChatHandle, eligible: typeof MODELS): ChoiceList => ({
+      title: "analyses that apply to this data",
+      items: eligible.map((m, i) => ({
+        id: m.id,
+        label: `${i + 1}. ${m.label}`,
+        hint: m.id === pipe?.chosen?.id ? "current" : undefined,
+      })),
+      onPick: (c) => {
+        const model = eligible.find((m) => m.id === c.id);
+        if (!model || !pipe) return;
+        try {
+          const result = model.run(pipe.dataset, pipe.metas);
+          setPipe({ ...pipe, chosen: model, rationale: "switched by you in chat", result });
+          chat.say(`running ${model.label} — the HARD pane has the result`);
+        } catch (e) {
+          chat.say(`${model.label} failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      },
+    }),
+    [pipe],
+  );
+
+  /** All three bots share one intent set — an actuary mid-thought should not
+   *  have to remember which pane a command belongs to. Returns null when the
+   *  text is conversation, which falls through to the model. */
+  const handleIntent = useCallback(
+    (text: string, chat: ChatHandle): string | null => {
+      const slash = text.startsWith("/");
+      const words = (slash ? text.slice(1) : text).trim().split(/\s+/);
+      const verb = (words[0] ?? "").toLowerCase();
+      const args = words.slice(1);
+      const eligible = pipe ? MODELS.filter((m) => m.applies(pipe.metas)) : [];
+
+      // "load example data", "/example", "load the claims sample" — the
+      // IDE's bundled samples, offered as a numbered menu. `load` is only
+      // claimed when the sentence is actually about samples; "load my
+      // broker file" falls through to path handling and the model.
+      const exampleVerb = ["example", "examples", "sample", "samples", "demo", "demos"];
+      if (exampleVerb.includes(verb) || (verb === "load" && args.some((w) => exampleVerb.includes(w.toLowerCase().replace(/[^a-z]/g, ""))))) {
+        const filler = new Set([...exampleVerb, "data", "dataset", "datasets", "the", "a", "an", "some", "please", "me"]);
+        const query = args.filter((w) => !filler.has(w.toLowerCase().replace(/[^a-z]/g, ""))).join(" ");
+        if (query === "") {
+          chat.openChoices(sampleChoices(chat));
+          return "";
+        }
+        const r = resolveSample(query);
+        if (!r.ok) {
+          // Ambiguous or unknown: offer the list rather than describing it.
+          // Being handed a chooser beats being told what you could have typed.
+          chat.openChoices(sampleChoices(chat));
+          return r.matches.length > 1 ? `"${query}" matches several —` : `no sample matches "${query}" —`;
+        }
+        if (running) return "a run is already in progress — wait for it to finish";
+        void start({ dataset: r.spec.build() });
+        return `loading ${r.spec.title} (${r.spec.rows}×${r.spec.cols}) — the pipeline is running on it`;
+      }
+
+      const known = COMMAND_NAMES.includes(verb);
+      if (!slash && !known) return null;
+      // Bare forms are accepted only where misfiring is implausible:
+      // "help"/"list" alone, and the imperatives "run X" / "export …".
+      // "show me the mean…" and "open questions…" are ordinary chat, so
+      // those two require the slash.
+      if (!slash && (verb === "show" || verb === "open")) return null;
+      if (!slash && (verb === "help" || verb === "list") && args.length > 0) return null;
+      if (!slash && verb === "run" && args.length === 0) return null;
+      if (!known) {
+        return `unknown command /${verb} — ${HELP}`;
+      }
+
+      switch (verb) {
+        case "help":
+          return HELP;
+        case "list": {
+          if (!pipe) return "no dataset loaded yet";
+          chat.openChoices(analysisChoices(chat, eligible));
+          return "";
+        }
+        case "run": {
+          if (!pipe) return "no dataset loaded yet";
+          if (args.length === 0) return "usage: /run <analysis or number> — /list shows the menu";
+          const r = resolveChoice(args.join(" "), eligible);
+          if (!r.ok) {
+            return r.matches.length > 1
+              ? `ambiguous — did you mean: ${r.matches.map((m) => m.label).join(" · ")}?`
+              : `no analysis matches "${args.join(" ")}" — /list shows the menu`;
+          }
+          try {
+            const result = r.model.run(pipe.dataset, pipe.metas);
+            setPipe({ ...pipe, chosen: r.model, rationale: "switched by you in chat", result });
+            return `running ${r.model.label} — the HARD pane has the result`;
+          } catch (e) {
+            return `${r.model.label} failed: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        }
+        case "show": {
+          if (!pipe) return "no dataset loaded yet";
+          if (args.length === 0) return "usage: /show <column>";
+          const q = args.join(" ").toLowerCase();
+          const exact = pipe.metas.find((m) => m.name.toLowerCase() === q);
+          const partial = pipe.metas.filter((m) => m.name.toLowerCase().includes(q));
+          const meta = exact ?? (partial.length === 1 ? partial[0] : null);
+          if (!meta) {
+            return partial.length > 1
+              ? `which one: ${partial.map((m) => m.name).join(" · ")}?`
+              : `no column called "${args.join(" ")}"`;
+          }
+          return columnCard(meta);
+        }
+        case "export": {
+          const targets: ExportTarget[] = [];
+          for (const w of args) {
+            const t = parseTarget(w);
+            if (!t) return `don't know the format "${w}" — try excel, python, notebook, r, sce or csv`;
+            targets.push(t);
+          }
+          doExport(targets.length > 0 ? targets : undefined, chat);
+          // doExport speaks for itself (start + finish lines).
+          return "";
+        }
+        case "open": {
+          const last = lastExport.current;
+          if (!last) return "nothing exported yet — /export first";
+          if (args.length === 0) {
+            // The directory itself, in the OS file manager.
+            const err = performOpen(last.dir, host);
+            return err ?? `opening ${relative(process.cwd(), last.dir) || last.dir}/`;
+          }
+          const t = parseTarget(args[0]);
+          if (!t) return `don't know "${args[0]}" — /open [excel|python|notebook|r|sce|csv]`;
+          const suffix = { csv: "data.csv", py: ".py", ipynb: ".ipynb", r: ".R", xlsx: ".xlsx", sce: ".sce" }[t];
+          const file = last.files.find((f) => f.name.endsWith(suffix));
+          if (!file) return `the last export did not include ${t} — /export ${t} first`;
+          const err = performOpen(`${last.dir}/${file.name}`, host);
+          return err ?? `opening ${file.name}`;
+        }
+      }
+      return null;
+    },
+    [pipe, doExport, start, running, sampleChoices, analysisChoices],
+  );
 
   // ── context each bot sees ───────────────────────────────────────────────
   // Rebuilt per send so a bot always reasons about the CURRENT state.
   const softCtx = useCallback(() => {
     const p = pipe;
-    if (!p) return "You are the SOFT DATA assistant. No dataset is loaded yet; say so.";
+    if (!p) return NO_DATA_CONTEXT("SOFT DATA");
     return [
       "You are the SOFT DATA assistant in an actuarial terminal workstation.",
       "Answer only from the profile below. Never invent columns or numbers. Be terse — 4 lines max.",
@@ -86,7 +393,7 @@ export function App({ initialPath }: { initialPath?: string }) {
 
   const toolsCtx = useCallback(() => {
     const p = pipe;
-    if (!p) return "You are the TOOLS assistant. Nothing has been analysed yet; say so.";
+    if (!p) return NO_DATA_CONTEXT("TOOLS");
     return [
       "You are the TOOLS assistant. You explain and revise the agent's choice of analysis.",
       "Be terse — 4 lines max. Never claim to have run anything.",
@@ -99,7 +406,7 @@ export function App({ initialPath }: { initialPath?: string }) {
 
   const hardCtx = useCallback(() => {
     const p = pipe;
-    if (!p?.result) return "You are the HARD DATA assistant. No results yet; say so.";
+    if (!p?.result) return NO_DATA_CONTEXT("HARD DATA");
     return [
       "You are the HARD DATA assistant. You interpret the result table below.",
       "Answer only from it. Be terse — 4 lines max.",
@@ -111,16 +418,80 @@ export function App({ initialPath }: { initialPath?: string }) {
     ].join("\n");
   }, [pipe]);
 
-  const softChat = useChat({ context: softCtx });
-  const toolsChat = useChat({ context: toolsCtx });
-  const hardChat = useChat({ context: hardCtx });
+  const softChat = useChat({ context: softCtx, onLocal: (t) => handleIntent(t, softChat) });
+  const toolsChat = useChat({ context: toolsCtx, onLocal: (t) => handleIntent(t, toolsChat) });
+  const hardChat = useChat({ context: hardCtx, onLocal: (t) => handleIntent(t, hardChat) });
   const chats = { soft: softChat, tools: toolsChat, hard: hardChat };
   const active = chats[focus];
 
   useInput((input, key) => {
+    // A click arrives on stdin as an escape sequence, and Ink hands it to us
+    // as if it were typing. Both guards are load-bearing: the flag catches it
+    // however Ink chose to split the bytes up, the pattern catches a sequence
+    // that reached us without the flag being set.
+    if (swallowingMouseBytes() || isMouseReport(input)) return;
     if (key.ctrl && input === "c") {
       exit();
       return;
+    }
+    if (key.ctrl && input === "o" && onSettings) {
+      onSettings();
+      return;
+    }
+    if (key.ctrl && input === "e") {
+      doExport(undefined, active);
+      return;
+    }
+    // A pushed sub-list is modal: it owns every key except the ctrl-
+    // shortcuts above and tab, which still moves panes. Typing filters it,
+    // which is why printable input is swallowed here rather than reaching
+    // the composer.
+    if (active.choices) {
+      if (key.upArrow) {
+        active.choiceMove(-1);
+        return;
+      }
+      if (key.downArrow) {
+        active.choiceMove(1);
+        return;
+      }
+      if (key.escape) {
+        active.choiceBack();
+        return;
+      }
+      if (key.return) {
+        active.choiceAccept();
+        return;
+      }
+      if (key.backspace || key.delete) {
+        active.choiceBackspace();
+        return;
+      }
+      if (!key.tab && input && !key.ctrl && !key.meta) {
+        active.choiceType(input);
+        return;
+      }
+    }
+    // The `/` menu is a mode: while it is open the arrows, ⏎, tab and esc
+    // belong to it. Checked before pane-switching so tab completes the
+    // command rather than throwing you into the next pane mid-word.
+    if (active.menu) {
+      if (key.upArrow) {
+        active.menuMove(-1);
+        return;
+      }
+      if (key.downArrow) {
+        active.menuMove(1);
+        return;
+      }
+      if (key.escape) {
+        active.menuDismiss();
+        return;
+      }
+      if (key.return || key.tab) {
+        active.menuAccept();
+        return;
+      }
     }
     if (key.tab) {
       setFocus((f) => ORDER[(ORDER.indexOf(f) + 1) % ORDER.length]);
@@ -162,8 +533,20 @@ export function App({ initialPath }: { initialPath?: string }) {
     <Box flexDirection="column">
       <Box>
         <Text color={theme.mute}>
-          scelo tui · {MODEL} · {running ? "running…" : p ? "ready" : "waiting for data"}
+          scelo tui · {activeLabel()} ·{" "}
         </Text>
+        {running ? (
+          <Working label={activeStageLabel(stages)} color={theme.soft} since={runStart} />
+        ) : (
+          <Text color={theme.mute}>{p ? "ready" : "waiting for data"}</Text>
+        )}
+        {p?.result && !running && (
+          <Text color={theme.ok}>
+            {" "}
+            · ⇩ export{host.kind === "plain" ? "" : ` → ${hostLabel(host)}`} (click here or
+            ctrl-e)
+          </Text>
+        )}
       </Box>
 
       {banner && (
@@ -172,7 +555,11 @@ export function App({ initialPath }: { initialPath?: string }) {
         </Box>
       )}
 
-      <Box>
+      {/* A definite height is what makes the composers line up: `flexGrow`
+          inside each pane can only push the input to the bottom if there is
+          a known bottom to push it to. Header + optional banner + footer are
+          the rows this row does not get. */}
+      <Box height={Math.max(12, rows - (banner ? 3 : 2))}>
         {/* ── SOFT ── */}
         <Pane title="SOFT · data" accent={theme.soft} focused={focus === "soft"} width={paneW}>
           <Head>file(s)</Head>
@@ -207,7 +594,8 @@ export function App({ initialPath }: { initialPath?: string }) {
           ) : (
             <Box flexDirection="column" marginTop={1}>
               <Text color={theme.mute}>drag a CSV onto this window,</Text>
-              <Text color={theme.mute}>or paste its path below and press ⏎</Text>
+              <Text color={theme.mute}>paste its path below and press ⏎,</Text>
+              <Text color={theme.mute}>or type /example for the IDE's sample data</Text>
             </Box>
           )}
           <ChatView chat={softChat} width={inner} accent={theme.soft} focused={focus === "soft"} />
@@ -218,16 +606,16 @@ export function App({ initialPath }: { initialPath?: string }) {
           <Head>pipeline</Head>
           {(Object.keys(STAGE_LABEL) as StageId[]).map((id) => {
             const st = stages[id];
+            // The live stage pulses; every other state is a settled glyph. So
+            // the one line that is still moving is the one still working.
             const mark =
               st?.state === "done"
                 ? "✓"
-                : st?.state === "active"
-                  ? "◈"
-                  : st?.state === "failed"
-                    ? "✕"
-                    : st?.state === "skipped"
-                      ? "–"
-                      : "·";
+                : st?.state === "failed"
+                  ? "✕"
+                  : st?.state === "skipped"
+                    ? "–"
+                    : "·";
             const col =
               st?.state === "done"
                 ? theme.ok
@@ -238,7 +626,7 @@ export function App({ initialPath }: { initialPath?: string }) {
                     : theme.mute;
             return (
               <Text key={id} color={col}>
-                {mark} {STAGE_LABEL[id]}
+                {st?.state === "active" ? <Spinner color={theme.tools} /> : mark} {STAGE_LABEL[id]}
                 {st?.detail ? <Text color={theme.mute}> · {st.detail}</Text> : null}
               </Text>
             );
@@ -248,6 +636,7 @@ export function App({ initialPath }: { initialPath?: string }) {
               <Head>chosen</Head>
               <Text color={theme.tools}>{p.chosen.label}</Text>
               <Prose text={p.rationale} width={inner} maxLines={4} color={theme.mute} />
+              <Text color={theme.mute}>/run to change · /list for the menu</Text>
             </>
           )}
           <ChatView
@@ -273,7 +662,15 @@ export function App({ initialPath }: { initialPath?: string }) {
                   <Text color={theme.mute}>{p.result.series.label}</Text>
                   <BarPlot
                     values={p.result.series.values}
-                    labels={p.result.rows.map((r) => String(r[0]))}
+                    // Row labels only when the series IS the rows — the
+                    // concentration analysis plots ten deciles against a
+                    // four-row table, and borrowing its labels would caption
+                    // decile 1 as "top 1%".
+                    labels={
+                      p.result.series.values.length === p.result.rows.length
+                        ? p.result.rows.map((r) => String(r[0]))
+                        : undefined
+                    }
                     width={inner}
                     color={theme.hard}
                     max={5}
@@ -291,7 +688,10 @@ export function App({ initialPath }: { initialPath?: string }) {
       </Box>
 
       <Box>
-        <Text color={theme.mute}>tab switch pane · ⏎ send (or paste a path to load) · ctrl-c quit</Text>
+        <Text color={theme.mute}>
+          click/tab pane · ⏎ send (or paste a path) · /help commands · ctrl-e export · ctrl-o
+          model · ctrl-c quit
+        </Text>
       </Box>
     </Box>
   );
@@ -302,6 +702,91 @@ export function App({ initialPath }: { initialPath?: string }) {
  *  slash, so it requires a data-file extension. */
 function looksLikePath(s: string): boolean {
   return /\.(csv|tsv|txt)['"]?$/i.test(s.trim()) && !/\s\?$/.test(s);
+}
+
+/**
+ * What a bot is told when there is nothing to talk about yet.
+ *
+ * The thin version of this ("no dataset is loaded; say so") produced the
+ * worst failure this app has had: shown a sample menu in its replayed
+ * history, then a bare "2", a capable model announced it had loaded the
+ * climate ensemble and printed a schema card for it — confidently, and
+ * entirely invented. `historyFor` now keeps app output out of the model's
+ * mouth; this closes the other half by making the boundary explicit rather
+ * than implied. An assistant that cannot act has to be TOLD it cannot act,
+ * or it will narrate the action instead.
+ */
+const NO_DATA_CONTEXT = (pane: string) =>
+  [
+    `You are the ${pane} assistant in an actuarial terminal workstation.`,
+    "",
+    "NO DATASET IS LOADED. You have no data, no columns, no rows, no numbers.",
+    "",
+    "You cannot load, open, read or fetch anything — only the app can, and",
+    "only when the user runs a command. Never say or imply that you have",
+    "loaded or received data. Never invent a schema, column list, row count,",
+    "summary or result. If asked to analyse or proceed, say plainly that",
+    "nothing is loaded yet and point at the commands below.",
+    "",
+    "How the user loads data:",
+    "  /example        list the bundled sample datasets",
+    "  /example 2      load one by number (a bare number works after the list)",
+    "  or drag a CSV onto the window, or paste its path and press enter",
+    "",
+    "Be terse — 3 lines max.",
+  ].join("\n");
+
+const HELP = helpText();
+
+/** Resolve "/example <what>" by menu number, key, or a title/subtitle
+ *  fragment. Ambiguity is reported, not guessed — same contract as
+ *  resolveChoice for analyses. */
+function resolveSample(
+  what: string,
+): { ok: true; spec: SampleSpec } | { ok: false; matches: SampleSpec[] } {
+  const q = what.trim().toLowerCase();
+  const n = Number(q);
+  if (Number.isInteger(n) && n >= 1 && n <= SAMPLES.length) {
+    return { ok: true, spec: SAMPLES[n - 1] };
+  }
+  const exact = SAMPLES.find((s) => s.key === q);
+  if (exact) return { ok: true, spec: exact };
+  const partial = SAMPLES.filter(
+    (s) =>
+      s.key.includes(q) ||
+      s.title.toLowerCase().includes(q) ||
+      s.subtitle.toLowerCase().includes(q),
+  );
+  if (partial.length === 1) return { ok: true, spec: partial[0] };
+  return { ok: false, matches: partial };
+}
+
+/** One column, as a card — the fastest answer the SOFT bot can give, and
+ *  the only one that stays available when the model is down. */
+function columnCard(m: ColumnMeta): string {
+  const lines = [
+    `\`${m.name}\` — ${m.type}`,
+    `n=${(m.count - m.missing).toLocaleString()} · missing=${m.missing.toLocaleString()} · unique=${m.unique.toLocaleString()}`,
+  ];
+  if (m.type === "number" && m.min !== undefined) {
+    lines.push(`min=${fmtCell(m.min)} · median=${fmtCell(m.median)} · mean=${fmtCell(m.mean)} · max=${fmtCell(m.max)}`);
+    if (m.quintiles) {
+      lines.push(`p20=${fmtCell(m.quintiles[0])} · p40=${fmtCell(m.quintiles[1])} · p60=${fmtCell(m.quintiles[2])} · p80=${fmtCell(m.quintiles[3])}`);
+    }
+  }
+  if (m.type === "date") lines.push(`${m.dateMin ?? "?"} → ${m.dateMax ?? "?"}`);
+  if (m.type === "string" && m.topValues?.length) {
+    lines.push(`top: ${m.topValues.slice(0, 5).map((t) => `${t.value} (${t.count})`).join(" · ")}`);
+  }
+  return lines.join("\n");
+}
+
+function fmtCell(n: number | undefined): string {
+  if (n === undefined || !Number.isFinite(n)) return "—";
+  const a = Math.abs(n);
+  if (a >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return String(Math.round(n * 100) / 100);
 }
 
 export { llmAvailable };

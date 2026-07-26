@@ -1,24 +1,100 @@
-// Direct-to-Ollama client.
+// Which model answers, and the two calls everything else makes.
 //
-// No orchestrator backend here — the TUI talks to the local model over HTTP,
-// the same shape the desktop IDE's main-process bridge uses. Cloud providers
-// would slot in behind the same two functions.
+// The panes and the pipeline import `complete` and `stream` and nothing else;
+// they have never known which provider is behind them and still don't. What
+// changed when Claude was added is that the answer is now chosen at runtime
+// instead of baked in at import, so the selection lives here as module state
+// rather than as a const.
 
-const OLLAMA = process.env.SCELO_OLLAMA_URL ?? "http://localhost:11434";
+import { anthropic } from "./anthropic";
+import { type Config, keyFor, loadConfig } from "./config";
+import { ollama } from "./ollama";
+import { openaiCompat } from "./openaiCompat";
+import { type ProviderId, type Selection, describe, isProviderId, provider } from "./providers";
+import type { Adapter, CallOpts, LlmMessage } from "./types";
 
-/** Default is the small fast model: three chat panes on one screen means
- *  interactivity matters more than prose quality. Override for the heavier
- *  local model with SCELO_TUI_MODEL=gemma3:27b. */
-export const MODEL = process.env.SCELO_TUI_MODEL ?? "qwen2.5:7b-instruct-q4_K_M";
+export type { LlmMessage };
+export type { Selection };
 
-export type LlmMessage = { role: "system" | "user" | "assistant"; content: string };
+const ADAPTERS: Record<ProviderId, Adapter> = {
+  ollama,
+  anthropic,
+  openai: openaiCompat,
+  google: openaiCompat,
+  openrouter: openaiCompat,
+};
 
-export async function llmAvailable(): Promise<boolean> {
+let config: Config = loadConfig();
+let active: Selection = initialSelection(config);
+
+/** Saved choice, with the environment allowed to override it — so a script
+ *  can pin a provider for one run without rewriting the user's config. */
+function initialSelection(cfg: Config): Selection {
+  const envProvider = process.env.SCELO_TUI_PROVIDER;
+  const envModel = process.env.SCELO_TUI_MODEL;
+  return {
+    provider: isProviderId(envProvider) ? envProvider : cfg.provider,
+    model: envModel && envModel.trim() !== "" ? envModel.trim() : cfg.model,
+  };
+}
+
+export function getConfig(): Config {
+  return config;
+}
+
+/** Re-read from disk. Called after the settings screen writes a key, so the
+ *  next request picks it up without restarting. */
+export function reloadConfig(): Config {
+  config = loadConfig();
+  return config;
+}
+
+export function getActive(): Selection {
+  return active;
+}
+
+export function setActive(sel: Selection): void {
+  active = sel;
+}
+
+/** Header text: `qwen2.5:7b` locally, `anthropic/claude-opus-5` remotely. */
+export function activeLabel(): string {
+  return describe(active);
+}
+
+/** Credentials and endpoint for a selection. Kept out of the adapters so
+ *  there is exactly one place that reads a key out of the config. */
+export function optsFor(sel: Selection): CallOpts {
+  const p = provider(sel.provider);
+  return {
+    apiKey: keyFor(config, sel.provider, p.envKey),
+    baseUrl: p.baseUrl ?? (sel.provider === "ollama" ? p.where : undefined),
+  };
+}
+
+function adapterFor(sel: Selection): Adapter {
+  return ADAPTERS[sel.provider];
+}
+
+/** Can the selected provider answer right now? A real round trip, so a stale
+ *  key or a stopped ollama shows up here rather than as three dead panes. */
+export async function llmAvailable(sel: Selection = active): Promise<boolean> {
   try {
-    const r = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(2500) });
-    return r.ok;
+    return await adapterFor(sel).available(sel.model, optsFor(sel));
   } catch {
     return false;
+  }
+}
+
+/** Models a provider will serve. Curated where the provider's own list is
+ *  unhelpful (Anthropic), discovered everywhere else. */
+export async function discoverModels(id: ProviderId): Promise<string[]> {
+  const p = provider(id);
+  if (p.models) return p.models.map((m) => m.id);
+  try {
+    return await ADAPTERS[id].models(optsFor({ provider: id, model: "" }));
+  } catch {
+    return [];
   }
 }
 
@@ -28,23 +104,7 @@ export async function complete(
   messages: LlmMessage[],
   opts: { maxTokens?: number; temperature?: number; signal?: AbortSignal } = {},
 ): Promise<string> {
-  const r = await fetch(`${OLLAMA}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      messages,
-      stream: false,
-      options: {
-        num_predict: opts.maxTokens ?? 400,
-        temperature: opts.temperature ?? 0.3,
-      },
-    }),
-    signal: opts.signal,
-  });
-  if (!r.ok) throw new Error(`ollama ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  const body = (await r.json()) as { message?: { content?: string } };
-  return (body.message?.content ?? "").trim();
+  return adapterFor(active).complete(active.model, messages, { ...optsFor(active), ...opts });
 }
 
 /** Streaming completion for the chat panes — a reply that lands all at once
@@ -53,44 +113,5 @@ export async function* stream(
   messages: LlmMessage[],
   opts: { maxTokens?: number; temperature?: number; signal?: AbortSignal } = {},
 ): AsyncGenerator<string> {
-  const r = await fetch(`${OLLAMA}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      messages,
-      stream: true,
-      options: {
-        num_predict: opts.maxTokens ?? 500,
-        temperature: opts.temperature ?? 0.4,
-      },
-    }),
-    signal: opts.signal,
-  });
-  if (!r.ok) throw new Error(`ollama ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  if (!r.body) throw new Error("ollama returned no body");
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    // Ollama emits newline-delimited JSON, one object per token batch.
-    let nl = buf.indexOf("\n");
-    while (nl !== -1) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) {
-        try {
-          const ev = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
-          const piece = ev.message?.content;
-          if (piece) yield piece;
-        } catch {
-          // partial / malformed line — skip rather than abandon the stream
-        }
-      }
-      nl = buf.indexOf("\n");
-    }
-  }
+  yield* adapterFor(active).stream(active.model, messages, { ...optsFor(active), ...opts });
 }
