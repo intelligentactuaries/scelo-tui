@@ -22,11 +22,22 @@ agent does the rest.
 **Status: walking skeleton.** It runs end to end and is worth using to judge
 the idea, not to do work with.
 
-## Run
+## Install
 
 ```bash
 bun install
-bun run src/main.tsx path/to/data.csv     # or start bare and paste a path
+bun link            # puts `scelo` on your PATH via ~/.bun/bin
+```
+
+`bun link` symlinks the live source, so edits take effect on the next run —
+there is no build step and nothing to reinstall.
+
+## Run
+
+```bash
+scelo                       # start bare, then drag a file in or paste a path
+scelo data.csv              # relative paths resolve against YOUR cwd
+scelo ~/work/policies.csv
 ```
 
 Needs a local model on `:11434`. Defaults to `qwen2.5:7b-instruct-q4_K_M`
