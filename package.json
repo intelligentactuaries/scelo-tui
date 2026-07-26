@@ -2,6 +2,11 @@
   "name": "scelo-tui",
   "version": "0.0.1",
   "private": true,
+  "license": "LicenseRef-Scelo-IDE-1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/intelligentactuaries/scelo-tui.git"
+  },
   "type": "module",
   "description": "Experimental three-pane terminal workstation for Scelo. Drop data in, the agent does the rest.",
   "bin": {
