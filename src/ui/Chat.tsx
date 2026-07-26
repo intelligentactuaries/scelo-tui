@@ -18,6 +18,38 @@ export type Turn = { role: "you" | "bot"; text: string };
  *  three simultaneous streams is the fastest way to make Ink stutter. */
 const MAX_TURNS = 12;
 
+/** Turns replayed to the model. Bounded separately from MAX_TURNS: the pane
+ *  can hold more than it is useful (or affordable) to resend, and a 7B model
+ *  on a laptop degrades quickly as the prompt grows. */
+const HISTORY_TURNS = 8;
+
+/** Longest single turn replayed. One pasted stack trace should not evict the
+ *  rest of the conversation from the context window. */
+const HISTORY_CHARS = 1200;
+
+/**
+ * Prior turns as model messages.
+ *
+ * Three things are deliberately filtered out, because replaying them teaches
+ * the model to imitate its own failures:
+ *   - empty assistant turns (the streaming placeholder, or a model that
+ *     returned nothing),
+ *   - local error text we wrote into the transcript ourselves — the model
+ *     never said it, and feeding it back invites more of the same,
+ *   - anything past HISTORY_TURNS, oldest first.
+ */
+function historyFor(turns: Turn[]): LlmMessage[] {
+  const usable = turns.filter(
+    (t) =>
+      t.text.trim() !== "" &&
+      !(t.role === "bot" && (t.text.startsWith("error: ") || t.text.startsWith("("))),
+  );
+  return usable.slice(-HISTORY_TURNS).map((t) => ({
+    role: t.role === "you" ? ("user" as const) : ("assistant" as const),
+    content: t.text.length > HISTORY_CHARS ? `${t.text.slice(0, HISTORY_CHARS)}…` : t.text,
+  }));
+}
+
 export type ChatHandle = {
   turns: Turn[];
   draft: string;
@@ -41,6 +73,13 @@ export function useChat(args: {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const abort = useRef<AbortController | null>(null);
+  // `submit` is memoised and reads the transcript when it fires, so reading
+  // `turns` from its closure would replay whatever the history was when the
+  // callback was last built — multi-turn would look wired up and silently
+  // resend a stale conversation. The ref is assigned during render, so it is
+  // always current, and `submit` keeps a stable identity through streaming.
+  const turnsRef = useRef<Turn[]>(turns);
+  turnsRef.current = turns;
 
   const say = useCallback((text: string) => {
     setTurns((t) => [...t, { role: "bot" as const, text }].slice(-MAX_TURNS));
@@ -64,6 +103,11 @@ export function useChat(args: {
     abort.current = ac;
     const msgs: LlmMessage[] = [
       { role: "system", content: args.context() },
+      // Prior turns, so "and the second one?" resolves against what was just
+      // said. `turns` here is the pre-send snapshot from the closure, which
+      // is what we want: the user turn we just pushed is appended explicitly
+      // below, and the empty assistant placeholder must not be sent at all.
+      ...historyFor(turnsRef.current),
       { role: "user", content: text },
     ];
     void (async () => {

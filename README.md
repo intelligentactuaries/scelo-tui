@@ -55,8 +55,8 @@ escaped), so the gesture works.
 ## Layout
 
 ```
-src/core/     dataset.ts   profiling + types, extracted from Scelo
-              cleaning.ts  the multi-pass auto-clean engine
+@scelo/core                profiling, typing, coercion, filtering (shared)
+src/core/     cleaning.ts  the multi-pass auto-clean engine
               csvParse.ts  delimiter sniffing + parsing
               ingest.ts    path normalisation, file -> Dataset
 src/agent/    llm.ts       direct-to-Ollama, one-shot + streaming
@@ -66,23 +66,26 @@ src/ui/       widgets.tsx  Pane, Table, BarPlot, Prose
 src/App.tsx                the three-pane shell
 ```
 
-## Vendored, not shared — and that is temporary
+## Shared core, not vendored
 
-`src/core/` is **copied** out of the Scelo repo, where the profiler and types
-live inside a 5,000-line React component. The logic was already pure; only its
-module was React-coupled.
+`@scelo/core` is a workspace package in the Scelo repo
+(`packages/scelo-core`), consumed here over a `file:` dependency. Profiling,
+typing, coercion and filtering have exactly one definition, so the two
+projects cannot drift.
 
-This is a drift hazard: changes to profiling or cleaning in Scelo do not reach
-here. The fix is to lift those symbols into a package both consume. It is a
-small job — 25 modules import from that component and they need exactly seven
-symbols between them (`Dataset`, `Row`, `CellValue`, `ColumnMeta`, `Filter`,
-`summariseDataset`, `SAMPLE_OPTIONS_LIST`).
+It used to live inside a 5,000-line React component, which meant 25 modules
+imported from a `.tsx` just to get a type and nothing outside the browser
+build could use any of it. The boundary is now "does it touch React, the DOM
+or ECharts" — `usePalette`, `tooltipFrame` and `sniffDelimitedText` (needs
+`Blob`) stayed behind; everything else runs under Bun unchanged.
+
+If you move the Scelo checkout, update the `file:` path in `package.json`.
 
 ## Not built yet
 
 - Only three analyses in the menu; Scelo's real catalog is ~30.
 - No swarm.
 - No session persistence — state dies with the process.
-- Chat is single-turn: each send starts fresh, with no history in the prompt.
+- Chat history is per-pane and per-session; it is not persisted.
 - No scrollback in the panes; you see the tail.
 - One dataset at a time, despite the `D₁…Dₙ` in the sketch.

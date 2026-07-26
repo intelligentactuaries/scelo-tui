@@ -7,7 +7,7 @@
 
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
-import { type CellValue, type Dataset, type Row, coerceCsvCell } from "./dataset";
+import { type CellValue, type Dataset, type Row, coerceCsvCell } from "@scelo/core";
 import { delimiterFor, parseCsv } from "./csvParse";
 
 /**

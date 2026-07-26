@@ -14,7 +14,7 @@
 // Every stage reports through `onStage` so three panes can fill in as the
 // work lands, rather than after it.
 
-import { type ColumnMeta, type Dataset, summariseDataset } from "../core/dataset";
+import { type ColumnMeta, type Dataset, summariseDataset } from "@scelo/core";
 import { type AutoCleanResult, autoCleanDataset } from "../core/cleaning";
 import { loadDataset } from "../core/ingest";
 import { complete, llmAvailable } from "./llm";
