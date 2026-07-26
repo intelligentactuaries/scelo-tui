@@ -25,6 +25,19 @@ Jupyter, R, Excel and the Scelo IDE in one command.
 
 ## Install
 
+**Prerequisite: the `scelo` repo checked out as a sibling.** `@scelo/core`
+is consumed over a `file:` path (`../scelo/packages/scelo-core`), so
+`bun install` fails here without it. That is deliberate — see *Shared core,
+not vendored* below — but it means the two repos are cloned together:
+
+```bash
+git clone git@github.com:intelligentactuaries/scelo.git
+git clone git@github.com:intelligentactuaries/scelo-tui.git
+cd scelo-tui
+```
+
+Then:
+
 ```bash
 bun install
 bun link            # puts `scelo` on your PATH via ~/.bun/bin
@@ -32,6 +45,9 @@ bun link            # puts `scelo` on your PATH via ~/.bun/bin
 
 `bun link` symlinks the live source, so edits take effect on the next run —
 there is no build step and nothing to reinstall.
+
+If your `scelo` checkout lives somewhere else, point the `file:` path in
+`package.json` at it.
 
 ## Run
 
