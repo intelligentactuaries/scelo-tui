@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Experimental three-pane terminal workstation for Scelo. Drop data in, the agent does the rest.",
   "bin": {
-    "scelo-tui": "./src/main.tsx"
+    "scelo": "./src/main.tsx"
   },
   "scripts": {
     "dev": "bun run src/main.tsx",
