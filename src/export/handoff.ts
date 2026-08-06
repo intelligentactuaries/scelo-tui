@@ -202,6 +202,18 @@ export function openCommand(
   if (host.kind === "vscode" && host.bin && CODE_OPENABLE.test(file)) {
     return [host.bin, ["-r", file]];
   }
+  // A notebook belongs to Jupyter. The system opener hands .ipynb to a text
+  // editor (raw JSON, nobody's idea of opening a notebook), so prefer any
+  // Jupyter frontend on PATH — lab first (the current default), classic
+  // notebook second, the bare `jupyter` launcher last.
+  if (file.endsWith(".ipynb")) {
+    const lab = probe("jupyter-lab");
+    if (lab) return [lab, [file]];
+    const nb = probe("jupyter-notebook");
+    if (nb) return [nb, [file]];
+    const jup = probe("jupyter");
+    if (jup) return [jup, ["notebook", file]];
+  }
   if (file.endsWith(".sce") && host.kind !== "scelo-ide") {
     const ide = env.SCELO_IDE_BIN?.trim() || probe("scelo-ide");
     if (ide) return [ide, [file]];
