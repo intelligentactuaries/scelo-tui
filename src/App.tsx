@@ -6,7 +6,7 @@
 
 import { relative } from "node:path";
 import { SAMPLES, SAMPLE_BY_KEY, type ColumnMeta, type SampleKey, type SampleSpec } from "@scelo/core";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MODELS, resolveChoice } from "./agent/analyses";
 import { activeLabel, llmAvailable } from "./agent/llm";
@@ -25,6 +25,7 @@ import { slugify } from "./export/sce";
 import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
 import { COMMAND_NAMES, helpText } from "./ui/commands";
 import { isMouseReport, swallowingMouseBytes, useMouse } from "./ui/mouse";
+import { paneWidths, useTerminalSize } from "./ui/size";
 import { Spinner, Working } from "./ui/spinner";
 import { MIN_HEIGHT, MIN_WIDTH, theme } from "./ui/theme";
 import { BarPlot, Head, Pane, Prose, Table } from "./ui/widgets";
@@ -72,9 +73,7 @@ export function App({
   onSettings?: () => void;
 }) {
   const { exit } = useApp();
-  const { stdout } = useStdout();
-  const cols = stdout?.columns ?? 80;
-  const rows = stdout?.rows ?? 24;
+  const { cols, rows } = useTerminalSize();
 
   const [focus, setFocus] = useState<Focus>("soft");
   const [stages, setStages] = useState<Partial<Record<StageId, StageEvent>>>({});
@@ -84,10 +83,14 @@ export function App({
   const [banner, setBanner] = useState<string | null>(null);
   const started = useRef(false);
 
-  const paneW = Math.max(20, Math.floor((cols - 8) / 3));
+  // Full-bleed thirds: the three widths sum to exactly `cols`, remainder
+  // absorbed by the HARD pane, so the borders reach the screen edge instead
+  // of leaving a dead strip on the right.
+  const { paneW, lastW } = paneWidths(cols);
   // Content width, not pane width: the Pane draws a border (1 col each side)
   // AND paddingX={1} (1 more each side). Getting this wrong makes every
-  // full-width rule wrap onto a second line.
+  // full-width rule wrap onto a second line. Shared by all three panes —
+  // HARD is at most 2 columns wider than its content needs, invisibly.
   const inner = paneW - 4;
 
   // Click anywhere in a column to type there. Deliberately mapped on the
@@ -773,7 +776,7 @@ export function App({
         </Pane>
 
         {/* ── HARD ── */}
-        <Pane title="HARD · output" accent={theme.hard} focused={focus === "hard"} width={paneW}>
+        <Pane title="HARD · output" accent={theme.hard} focused={focus === "hard"} width={lastW}>
           {p?.result ? (
             <>
               <Head>table</Head>
