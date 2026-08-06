@@ -329,7 +329,14 @@ export function buildPython(pipe: PipelineResult, now: Date, dataFile = "data.cs
 export function buildR(pipe: PipelineResult, now: Date, dataFile = "data.csv"): string {
   const snip = pipe.chosen ? snippetFor(pipe.chosen.id, pipe.metas) : null;
   const out: string[] = provenance(pipe, now, dataFile).map((l) => `# ${l}`.trimEnd());
-  out.push("", `df <- read.csv(${rStr(dataFile)}, stringsAsFactors = FALSE)`, "");
+  out.push(
+    "",
+    `df <- read.csv(${rStr(dataFile)}, stringsAsFactors = FALSE)`,
+    "# Browse the data with RStudio's viewer:  View(df)",
+    "# (Don't open the csv itself as a file — RStudio's source editor caps",
+    "#  out at 5 MB; the viewer handles any size.)",
+    "",
+  );
   if (snip) {
     out.push(...snip.r);
   } else {
