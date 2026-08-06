@@ -188,22 +188,30 @@ with the extension.
 ## the live mirror — RStudio and Jupyter while the session runs
 
 `/export` is the session after the fact; `/live` is the session AS IT
-HAPPENS. Arm it and the TUI rewrites two files at every milestone — after
-auto-clean (before the slow LLM stages), when the first analysis lands,
-and on every `/run` switch:
+HAPPENS. Arm it and the TUI rewrites the live files at every milestone —
+after auto-clean (before the slow LLM stages), when the first analysis
+lands, and on every `/run` switch:
 
 ```
-<stem>_live.R        source() it in the RStudio console at any moment.
-                     Each analysis is a section that announces itself with
-                     message() and prints its result; re-sourcing
-                     mid-session replays what exists so far and says the
-                     session is still in progress.
+<stem>_live_watch.R  THE AUTOMATED PATH: source() this ONCE in the RStudio
+                     console and every later update runs itself — the
+                     watcher polls the live script (via `later`, which
+                     RStudio's idle loop pumps) and re-sources on change,
+                     so new sections print in the console as the TUI
+                     produces them. scelo_watch_stop() stops it; without
+                     `later` installed it degrades to a one-keystroke
+                     scelo_refresh().
+<stem>_live.R        the live script itself — also source()-able by hand
+                     at any moment. Each analysis is a section that
+                     announces itself with message() and prints its
+                     result; a partial session says it is still in
+                     progress.
 <stem>_live.ipynb    open it in Jupyter (/open notebook). When scelo adds
                      sections, Jupyter offers "file changed on disk —
                      reload"; new analyses appear at the bottom.
-<stem>_data.csv      the cleaned dataset both of them read — the same name
-                     the final /export writes, so live and final scripts
-                     are interchangeable.
+<stem>_data.csv      the cleaned dataset they all read — the same name the
+                     final /export writes, so live and final scripts are
+                     interchangeable.
 ```
 
 Placement follows the host table above: flat into an open RStudio project /
