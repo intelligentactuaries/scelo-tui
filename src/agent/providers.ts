@@ -43,11 +43,15 @@ export type Provider = {
 };
 
 /** Anthropic's current models. Opus 5 leads because it is the capable
- *  default; the other two are here because a three-pane terminal makes
- *  latency visible in a way a chat window does not, and that is a tradeoff
- *  the user should get to make rather than have made for them. */
+ *  default; the rest are here because a three-pane terminal makes latency
+ *  and cost visible in a way a chat window does not, and those are
+ *  tradeoffs the user should get to make rather than have made for them.
+ *  Fable 5 needs no special handling in anthropic.ts: we never send a
+ *  `thinking` param (Fable rejects explicit configs — thinking is always
+ *  on), and the refusal fallback regex already covers it. */
 const ANTHROPIC_MODELS: ModelOption[] = [
   { id: "claude-opus-5", note: "most capable · the default" },
+  { id: "claude-fable-5", note: "highest capability tier · 2× opus price, longer turns" },
   { id: "claude-sonnet-5", note: "near-opus, faster and cheaper" },
   { id: "claude-haiku-4-5", note: "fastest, cheapest" },
   { id: "claude-opus-4-8", note: "previous opus" },
