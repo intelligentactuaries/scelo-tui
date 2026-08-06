@@ -125,9 +125,20 @@ Choose only from the menu. Do not invent an analysis.`;
  *  must not care which it was. */
 export type PipelineSource = string | { dataset: Dataset };
 
+/** The deterministic half of the pipeline — everything that exists BEFORE
+ *  the LLM stages run. Handed to `onPartial` so a live mirror can put the
+ *  cleaned data + profile in front of RStudio / Jupyter while the model is
+ *  still reading and choosing (the slowest stretch of the run). */
+export type PipelinePartial = {
+  dataset: Dataset;
+  metas: ColumnMeta[];
+  clean: AutoCleanResult;
+};
+
 export async function runPipeline(
   source: PipelineSource,
   onStage: (e: StageEvent) => void,
+  onPartial?: (p: PipelinePartial) => void,
 ): Promise<{ ok: true; value: PipelineResult } | { ok: false; error: string }> {
   // 1 — ingest
   onStage({ stage: "ingest", state: "active" });
@@ -164,6 +175,17 @@ export async function runPipeline(
         ? "already clean"
         : `${steps} step${steps === 1 ? "" : "s"} over ${clean.passes.length} pass${clean.passes.length === 1 ? "" : "es"}`,
   });
+
+  // Cleaned data + profile exist now — let the live mirror publish them
+  // before the (slow) LLM stages start. A callback failure must not take
+  // the pipeline down with it: mirroring is a side-car, not a stage.
+  if (onPartial) {
+    try {
+      onPartial({ dataset, metas, clean });
+    } catch {
+      // deliberately swallowed — see above
+    }
+  }
 
   // The LLM stages degrade rather than fail: a pipeline that refuses to show
   // a profile because a local model is down would be worse than useless.

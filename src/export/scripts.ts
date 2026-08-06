@@ -55,7 +55,7 @@ const R_PERIOD: Record<"month" | "quarter" | "year", (d: string) => string[]> = 
   year: (d) => [`period <- format(${d}, "%Y")`],
 };
 
-function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
+export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
   switch (id) {
     case "numeric-summary":
       // Mirrors the pane (and the IDE's descriptive report) stat for stat:
@@ -277,7 +277,7 @@ export function coveredAnalyses(metas: ColumnMeta[], ids: string[]): string[] {
 
 // ── provenance header ─────────────────────────────────────────────────────
 
-function provenance(pipe: PipelineResult, now: Date, dataFile: string): string[] {
+export function provenance(pipe: PipelineResult, now: Date, dataFile: string): string[] {
   const d = pipe.dataset;
   const steps = pipe.clean?.passes.reduce((n, p) => n + p.opLabels.length, 0) ?? 0;
   const lines = [
