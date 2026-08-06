@@ -18,6 +18,41 @@ import { delimiterFor, parseCsv } from "./csvParse";
  * Getting this wrong is the difference between "drag a file in and it works"
  * and an unexplained ENOENT, so all three shapes are handled.
  */
+/**
+ * The data-file path buried in a noisy drop line, or null when the line is
+ * prose (or holds no path at all).
+ *
+ * Dragging a file through a terminal can bracket the pasted path with mouse
+ * reports and stray bytes — `0;95;34M'/data/book.csv'0;95;34m` — and the
+ * user's instruction for that case is exactly right: ignore everything but
+ * the path. Candidates are quoted spans, file:// URIs, and absolute/`~`
+ * paths ending in a data extension; the FIRST one wins (a multi-file drag
+ * pastes several paths, and for part-file sets the sibling loader brings
+ * the rest anyway). Prose stays prose: if meaningful text remains after
+ * removing the path and the junk, this is a sentence that mentions a file,
+ * not a drop — return null and let the chat have it.
+ */
+export function extractDataPath(text: string): string | null {
+  const noise = /(?:\x1b?\[?<?)?\d{1,4};\d{1,4};\d{1,4}[Mm]/g;
+  const cleaned = text.replace(noise, "").trim();
+  if (cleaned === "") return null;
+  // Every span that could be a path, in one pattern — used twice: globally
+  // for the prose test, then non-globally for the extraction.
+  const anyPath =
+    /'((?:~|\/|[A-Za-z]:\\)[^']*\.(?:csv|tsv|txt))'|"((?:~|\/|[A-Za-z]:\\)[^"]*\.(?:csv|tsv|txt))"|(file:\/\/[^\s'"]+\.(?:csv|tsv|txt))|((?:~\/|\/)(?:\\ |[^'"\s])+\.(?:csv|tsv|txt))/gi;
+  // Residue test: strip ALL path spans, quotes, and whitespace — if what's
+  // left still reads as words, the user wrote a sentence ABOUT a file, not
+  // a drop. (A multi-file drag leaves only quotes and spaces behind.)
+  const residue = cleaned.replace(anyPath, "").replace(/['"\s]/g, "");
+  if (/[A-LN-Za-ln-z]{2,}/.test(residue)) return null;
+  anyPath.lastIndex = 0;
+  const m = anyPath.exec(cleaned);
+  if (!m) return null;
+  // First span wins: a multi-file drag pastes several paths, and for
+  // part-file sets the sibling loader brings the rest anyway.
+  return m[1] ?? m[2] ?? m[3] ?? m[4] ?? null;
+}
+
 export function normaliseDroppedPath(raw: string): string {
   let p = raw.trim();
   if (

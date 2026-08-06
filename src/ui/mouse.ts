@@ -67,6 +67,37 @@ export function swallowingMouseBytes(): boolean {
   return swallow;
 }
 
+/** Report payloads that arrive WITHOUT their `ESC[<` prefix. A terminal is
+ *  free to split a report across read chunks (RStudio's xterm.js does), and
+ *  the continuation half — `0;95;34M` — carries no escape byte for anyone
+ *  to recognise, so it walks straight into the composer as "typing". Nobody
+ *  types `digits;digits;digitsM`, so stripping the shape wholesale is safe. */
+const NOISE = /(?:\x1b?\[?<?)?\d{1,4};\d{1,4};\d{1,4}[Mm]/g;
+
+export function stripMouseNoise(s: string): string {
+  NOISE.lastIndex = 0;
+  return s.replace(NOISE, "");
+}
+
+/**
+ * Per-chunk swallow decision for the stdin listener, tracking split reports.
+ *
+ * The plain `PARTIAL` test catches any chunk carrying `ESC[<` — but when a
+ * report is cut mid-sequence, the NEXT chunk is bare digits (`4M\x1b[<…` or
+ * just `5;34`) and would pass for typing. The classifier remembers that the
+ * previous chunk ended mid-report and swallows continuations too.
+ */
+export function makeChunkClassifier(): (s: string) => boolean {
+  let dangling = false;
+  return (s: string): boolean => {
+    const continuation = dangling && /^[0-9;Mm]/.test(s);
+    const shouldSwallow = PARTIAL.test(s) || continuation;
+    dangling =
+      /\x1b\[<?[0-9;]*$/.test(s) || (continuation && /^[0-9;]+$/.test(s));
+    return shouldSwallow;
+  };
+}
+
 /** Does this look like a mouse report rather than typing? The leading ESC is
  *  optional because Ink strips it from sequences it does not recognise.
  *
@@ -115,9 +146,10 @@ export function useMouse(onClick: (c: Click) => void, enabled = true): void {
     process.stdout.write(ENABLE);
     mouseOn = true;
 
+    const classify = makeChunkClassifier();
     const onData = (data: Buffer | string) => {
       const s = typeof data === "string" ? data : data.toString("utf8");
-      if (!PARTIAL.test(s)) return;
+      if (!classify(s)) return;
       // Set before Ink's listener runs; cleared once this chunk is fully
       // dispatched.
       swallow = true;
@@ -141,12 +173,14 @@ export function useMouse(onClick: (c: Click) => void, enabled = true): void {
     process.on("exit", disableOnce);
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
+    process.on("SIGHUP", onSignal);
 
     return () => {
       stdin.removeListener("data", onData);
       process.off("exit", disableOnce);
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
+      process.off("SIGHUP", onSignal);
       disableOnce();
     };
   }, [enabled]);

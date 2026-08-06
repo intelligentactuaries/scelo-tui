@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_ROWS, loadDataset, normaliseDroppedPath } from "./ingest";
+import { MAX_ROWS, extractDataPath, loadDataset, normaliseDroppedPath } from "./ingest";
 
 function partDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "scelo-ingest-"));
@@ -79,5 +79,35 @@ describe("normaliseDroppedPath", () => {
     expect(normaliseDroppedPath('"/tmp/a.csv"')).toBe("/tmp/a.csv");
     expect(normaliseDroppedPath("file:///tmp/a%20b.csv")).toBe("/tmp/a b.csv");
     expect(normaliseDroppedPath("/tmp/a\\ b.csv")).toBe("/tmp/a b.csv");
+  });
+});
+
+describe("extractDataPath", () => {
+  test("a clean pasted path comes back as itself", () => {
+    expect(extractDataPath("/home/x/claims.csv")).toBe("/home/x/claims.csv");
+    expect(extractDataPath("  '/home/x/a b.csv'  ")).toBe("/home/x/a b.csv");
+    expect(extractDataPath("~/data/book.tsv")).toBe("~/data/book.tsv");
+  });
+
+  test("a drag bracketed by mouse-report junk yields ONLY the path", () => {
+    expect(extractDataPath("0;95;34M'/home/x/a b.csv'0;95;34m")).toBe("/home/x/a b.csv");
+    expect(extractDataPath("0;140;37M/home/x/claims.csv0;140;37m")).toBe("/home/x/claims.csv");
+    expect(extractDataPath("[<0;95;34Mfile:///tmp/a.csv")).toBe("file:///tmp/a.csv");
+  });
+
+  test("a multi-file drag takes the first path (siblings load themselves)", () => {
+    const line = "'/d/book_part1_of_3.csv' '/d/book_part2_of_3.csv' '/d/book_part3_of_3.csv'";
+    expect(extractDataPath(line)).toBe("/d/book_part1_of_3.csv");
+  });
+
+  test("prose that mentions a file stays prose", () => {
+    expect(extractDataPath("what is in /home/x/claims.csv")).toBeNull();
+    expect(extractDataPath("compare claims.csv to last year")).toBeNull();
+    expect(extractDataPath("summarise the data")).toBeNull();
+  });
+
+  test("junk without any path is not a drop", () => {
+    expect(extractDataPath("0;95;34M0;95;34m")).toBeNull();
+    expect(extractDataPath("")).toBeNull();
   });
 });
