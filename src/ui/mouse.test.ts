@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isMouseReport, parseReports } from "./mouse";
+import { isMouseReport, makeChunkClassifier, parseReports, stripMouseNoise } from "./mouse";
 
 // A click in a terminal is a string on stdin, and it arrives on the same
 // stream as typing. Everything here guards one of two failure modes: focus
@@ -74,5 +74,41 @@ describe("isMouseReport", () => {
     for (const s of ["a", "<", "hello", "3;4", "[", "[<", "why < that?", "Array[<T>]"]) {
       expect(isMouseReport(s)).toBe(false);
     }
+  });
+});
+
+describe("stripMouseNoise", () => {
+  test("removes bare report payloads that lost their escape prefix", () => {
+    expect(stripMouseNoise("0;95;34M0;95;34m")).toBe("");
+    expect(stripMouseNoise("4M")).toBe("4M"); // too short to be a report
+    expect(stripMouseNoise("hello 0;140;37M world")).toBe("hello  world");
+    expect(stripMouseNoise("[<0;95;34M/data/a.csv")).toBe("/data/a.csv");
+  });
+
+  test("leaves ordinary typing alone", () => {
+    expect(stripMouseNoise("premium by region?")).toBe("premium by region?");
+    expect(stripMouseNoise("/run 3")).toBe("/run 3");
+  });
+});
+
+describe("makeChunkClassifier", () => {
+  test("swallows a report split across two chunks", () => {
+    const classify = makeChunkClassifier();
+    expect(classify("\x1b[<0;95;3")).toBe(true); // starts a report, ends dangling
+    expect(classify("4M\x1b[<0;95;34m")).toBe(true); // continuation + more reports
+    expect(classify("hello")).toBe(false); // ordinary typing after the dust settles
+  });
+
+  test("swallows a report split across THREE chunks", () => {
+    const classify = makeChunkClassifier();
+    expect(classify("\x1b[<0;9")).toBe(true);
+    expect(classify("5;34")).toBe(true); // pure digits — still mid-report
+    expect(classify("M")).toBe(true); // the terminating byte
+    expect(classify("real typing")).toBe(false);
+  });
+
+  test("never swallows typing without a dangling report", () => {
+    const classify = makeChunkClassifier();
+    expect(classify("1;2;3 looks numeric but no report started")).toBe(false);
   });
 });
