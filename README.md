@@ -80,6 +80,8 @@ the deterministic parts of that work with or without a model:
 /show premium         one column's profile as a card
 /export               everything, into ./<name>.scelo-export/
 /export excel r       just those formats
+/live                 mirror the session into live R + notebook files
+/live off             stop mirroring (the files stay where they are)
 /help                 all of the above
 ```
 
@@ -174,11 +176,44 @@ are generated to read the prefixed name, so `source()` and `Run All` work
 unmodified.
 
 `/open [excel|python|notebook|r|sce|csv]` hands one artifact to whatever
-should open it: `code -r` for code files inside VS Code, the OS opener
-otherwise — which for the workbook means Excel/LibreOffice, i.e. "open the
-spreadsheet normally". A bare `/open` opens the export folder. `.sce` on a
-plain terminal prefers the packaged IDE binary (`scelo-ide` on PATH, or
-`SCELO_IDE_BIN`) over whatever the OS associates with the extension.
+should open it: `code -r` for code files inside VS Code, any Jupyter
+frontend on PATH for notebooks (`jupyter-lab`, then `jupyter-notebook`,
+then bare `jupyter` — the OS opener would hand a notebook to a text editor),
+the OS opener otherwise — which for the workbook means Excel/LibreOffice,
+i.e. "open the spreadsheet normally". A bare `/open` opens the export
+folder. `.sce` on a plain terminal prefers the packaged IDE binary
+(`scelo-ide` on PATH, or `SCELO_IDE_BIN`) over whatever the OS associates
+with the extension.
+
+## the live mirror — RStudio and Jupyter while the session runs
+
+`/export` is the session after the fact; `/live` is the session AS IT
+HAPPENS. Arm it and the TUI rewrites two files at every milestone — after
+auto-clean (before the slow LLM stages), when the first analysis lands,
+and on every `/run` switch:
+
+```
+<stem>_live.R        source() it in the RStudio console at any moment.
+                     Each analysis is a section that announces itself with
+                     message() and prints its result; re-sourcing
+                     mid-session replays what exists so far and says the
+                     session is still in progress.
+<stem>_live.ipynb    open it in Jupyter (/open notebook). When scelo adds
+                     sections, Jupyter offers "file changed on disk —
+                     reload"; new analyses appear at the bottom.
+<stem>_data.csv      the cleaned dataset both of them read — the same name
+                     the final /export writes, so live and final scripts
+                     are interchangeable.
+```
+
+Placement follows the host table above: flat into an open RStudio project /
+Scelo IDE workspace, into `./<stem>.scelo-export/` elsewhere. Two
+guarantees make it safe to consume mid-flight: every write is atomic
+(tmp + rename — a `source()` racing a rewrite sees the old file or the new
+one, never half), and every intermediate file is valid (partial sessions
+parse in R and load as nbformat JSON — the test suite has R and Python
+verify exactly that). Opt-in on purpose: the TUI is a guest in your
+directory and writes nothing unasked.
 
 Two honest boundaries. RStudio has no CLI to open a file in its editor —
 requested for years ([rstudio/rstudio#1850](https://github.com/rstudio/rstudio/issues/1850),

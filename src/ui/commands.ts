@@ -25,6 +25,7 @@ export type Command = {
 export const COMMANDS: Command[] = [
   { name: "example", args: "[number|name]", hint: "load a bundled sample dataset", standalone: true },
   { name: "export", args: "[format…]", hint: "write artifacts for every tool", standalone: true },
+  { name: "live", args: "[off]", hint: "mirror the session into RStudio/Jupyter files as it runs", standalone: true },
   { name: "open", args: "[format]", hint: "open an exported artifact", standalone: true },
   { name: "list", hint: "the analyses that apply to this data", standalone: true },
   { name: "run", args: "<analysis|number>", hint: "switch the analysis", standalone: false },
