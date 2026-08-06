@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MODELS, resolveChoice } from "./agent/analyses";
 import { activeLabel, llmAvailable } from "./agent/llm";
 import {
+  type PipelinePartial,
   type PipelineResult,
   type PipelineSource,
   type StageEvent,
@@ -19,6 +20,8 @@ import {
 } from "./agent/pipeline";
 import { type ExportOutcome, type ExportTarget, exportArtifacts, parseTarget } from "./export";
 import { detectHost, hostLabel, performHandoff, performOpen, planFor } from "./export/handoff";
+import { type LiveMirror, type LiveRun, createLiveMirror } from "./export/live";
+import { slugify } from "./export/sce";
 import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
 import { COMMAND_NAMES, helpText } from "./ui/commands";
 import { isMouseReport, swallowingMouseBytes, useMouse } from "./ui/mouse";
@@ -111,6 +114,51 @@ export function App({
   );
   exportClick.current = pipe?.result ? () => doExport(undefined, active) : null;
 
+  // Detected once: the hosting terminal cannot change mid-process, and the
+  // detection probes PATH, which is not free. Declared before `start`
+  // because the live mirror (below) plans its file layout from it.
+  const host = useRef(detectHost()).current;
+
+  // ── the live mirror (/live) ─────────────────────────────────────────────
+  // Opt-in: the TUI is a guest in somebody's directory and does not write
+  // files unasked. Once armed, every pipeline milestone rewrites
+  // <stem>_live.R / <stem>_live.ipynb (+ the cleaned csv) so RStudio can
+  // source() and Jupyter can reload WHILE the session is still moving.
+  // All refs: nothing here renders — the chat narrates instead.
+  const liveEnabled = useRef(false);
+  const liveMirror = useRef<LiveMirror | null>(null);
+  const liveStem = useRef<string | null>(null);
+  const liveRuns = useRef<LiveRun[]>([]);
+
+  const stemOf = (name: string) => slugify(name.replace(/\.(csv|tsv|txt|parquet)$/i, ""));
+
+  /** Rewrite the live files from the current state. Failures disarm the
+   *  mirror and surface once in the banner — a full disk must not turn
+   *  every later stage into a crash. */
+  const liveUpdate = useCallback(
+    (
+      state: Pick<PipelineResult, "dataset" | "metas" | "clean" | "reading">,
+      inProgress: boolean,
+    ) => {
+      if (!liveEnabled.current) return;
+      try {
+        const stem = stemOf(state.dataset.name);
+        if (!liveMirror.current || liveStem.current !== stem) {
+          liveMirror.current = createLiveMirror({ stem, ...planFor(host) });
+          liveStem.current = stem;
+        }
+        liveMirror.current.update({ ...state, runs: liveRuns.current, inProgress });
+      } catch (e) {
+        liveEnabled.current = false;
+        liveMirror.current = null;
+        setBanner(
+          `live mirror failed: ${e instanceof Error ? e.message : String(e)} — /live to re-arm`,
+        );
+      }
+    },
+    [host],
+  );
+
   const start = useCallback(
     async (source: PipelineSource) => {
       if (running) return;
@@ -119,19 +167,39 @@ export function App({
       setStages({});
       setPipe(null);
       setBanner(null);
+      // A fresh dataset starts a fresh live story — the mirror's run list
+      // must not carry sections from the previous file.
+      liveRuns.current = [];
       // Only a real path is worth remembering for the picker round-trip — a
       // sample rebuilds from its key, and re-running it after a model switch
       // is a fresh build anyway.
       if (typeof source === "string") onPath?.(source);
-      const r = await runPipeline(source, (e) =>
-        setStages((s) => ({ ...s, [e.stage]: e })),
+      const r = await runPipeline(
+        source,
+        (e) => setStages((s) => ({ ...s, [e.stage]: e })),
+        // Cleaned data + profile exist here, before the slow LLM stages —
+        // the live mirror's whole reason to exist: RStudio/Jupyter get the
+        // data while the model is still thinking.
+        (p: PipelinePartial) => liveUpdate({ ...p, reading: "" }, true),
       );
       setRunning(false);
       setRunStart(null);
       if (!r.ok) setBanner(r.error);
-      else setPipe(r.value);
+      else {
+        setPipe(r.value);
+        if (r.value.chosen && r.value.result) {
+          liveRuns.current = [
+            {
+              id: r.value.chosen.id,
+              label: r.value.chosen.label,
+              rationale: r.value.rationale,
+            },
+          ];
+        }
+        liveUpdate(r.value, false);
+      }
     },
-    [running, onPath],
+    [running, onPath, liveUpdate],
   );
 
   // Auto-run a path given on the command line — from an effect, not from
@@ -152,9 +220,6 @@ export function App({
   // down — the app degrades to "no prose", never to "no controls".
 
   const exporting = useRef(false);
-  // Detected once: the hosting terminal cannot change mid-process, and the
-  // detection probes PATH, which is not free.
-  const host = useRef(detectHost()).current;
   // What /open resolves names against — the most recent export.
   const lastExport = useRef<ExportOutcome | null>(null);
 
@@ -242,14 +307,17 @@ export function App({
         if (!model || !pipe) return;
         try {
           const result = model.run(pipe.dataset, pipe.metas);
-          setPipe({ ...pipe, chosen: model, rationale: "switched by you in chat", result });
+          const next = { ...pipe, chosen: model, rationale: "switched by you in chat", result };
+          setPipe(next);
+          liveRuns.current.push({ id: model.id, label: model.label, rationale: next.rationale });
+          liveUpdate(next, false);
           chat.say(`running ${model.label} — the HARD pane has the result`);
         } catch (e) {
           chat.say(`${model.label} failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       },
     }),
-    [pipe],
+    [pipe, liveUpdate],
   );
 
   /** All three bots share one intent set — an actuary mid-thought should not
@@ -319,7 +387,10 @@ export function App({
           }
           try {
             const result = r.model.run(pipe.dataset, pipe.metas);
-            setPipe({ ...pipe, chosen: r.model, rationale: "switched by you in chat", result });
+            const next = { ...pipe, chosen: r.model, rationale: "switched by you in chat", result };
+            setPipe(next);
+            liveRuns.current.push({ id: r.model.id, label: r.model.label, rationale: next.rationale });
+            liveUpdate(next, false);
             return `running ${r.model.label} — the HARD pane has the result`;
           } catch (e) {
             return `${r.model.label} failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -350,26 +421,80 @@ export function App({
           // doExport speaks for itself (start + finish lines).
           return "";
         }
+        case "live": {
+          if ((args[0] ?? "").toLowerCase() === "off") {
+            if (!liveEnabled.current) return "the live mirror is already off";
+            liveEnabled.current = false;
+            const f = liveMirror.current?.files();
+            liveMirror.current = null;
+            return f
+              ? `live mirror off — ${f.r} and ${f.ipynb} stay as they are, no longer updated`
+              : "live mirror off";
+          }
+          const already = liveEnabled.current;
+          liveEnabled.current = true;
+          // A session that already has results seeds the mirror with them —
+          // arming late must not produce an emptier file than the screen.
+          if (pipe) {
+            if (liveRuns.current.length === 0 && pipe.chosen && pipe.result) {
+              liveRuns.current = [
+                { id: pipe.chosen.id, label: pipe.chosen.label, rationale: pipe.rationale },
+              ];
+            }
+            liveUpdate(pipe, running);
+          }
+          if (!liveEnabled.current) return ""; // liveUpdate failed and said so in the banner
+          const f = liveMirror.current?.files();
+          const lines = [
+            already ? "the live mirror is already on" : "live mirror on — updating as the session advances",
+          ];
+          if (f) {
+            const where = relative(process.cwd(), f.dir);
+            lines.push(
+              host.kind === "rstudio"
+                ? `RStudio: run  source("${f.r}")  in the console any time — re-run it for new sections`
+                : `R: source("${where ? `${where}/` : ""}${f.r}") · re-run any time for new sections`,
+              `Jupyter: /open notebook — reload when it offers "file changed on disk"`,
+            );
+          } else {
+            lines.push("armed — drop a dataset in and the files follow it");
+          }
+          return lines.join("\n");
+        }
         case "open": {
           const last = lastExport.current;
-          if (!last) return "nothing exported yet — /export first";
+          // The live mirror's files stand in when nothing was /export-ed
+          // yet — "/live then /open notebook" is the whole Jupyter flow.
+          const live = liveEnabled.current ? liveMirror.current?.files() : undefined;
+          if (!last && !live) return "nothing exported yet — /export (or /live) first";
           if (args.length === 0) {
-            // The directory itself, in the OS file manager.
-            const err = performOpen(last.dir, host);
-            return err ?? `opening ${relative(process.cwd(), last.dir) || last.dir}/`;
+            const dir = last?.dir ?? live?.dir;
+            if (!dir) return "nothing exported yet — /export (or /live) first";
+            const err = performOpen(dir, host);
+            return err ?? `opening ${relative(process.cwd(), dir) || dir}/`;
           }
           const t = parseTarget(args[0]);
           if (!t) return `don't know "${args[0]}" — /open [excel|python|notebook|r|sce|csv]`;
           const suffix = { csv: "data.csv", py: ".py", ipynb: ".ipynb", r: ".R", xlsx: ".xlsx", sce: ".sce" }[t];
-          const file = last.files.find((f) => f.name.endsWith(suffix));
-          if (!file) return `the last export did not include ${t} — /export ${t} first`;
-          const err = performOpen(`${last.dir}/${file.name}`, host);
-          return err ?? `opening ${file.name}`;
+          const file = last?.files.find((f) => f.name.endsWith(suffix));
+          if (file && last) {
+            const err = performOpen(`${last.dir}/${file.name}`, host);
+            return err ?? `opening ${file.name}`;
+          }
+          const liveName =
+            live && (t === "ipynb" ? live.ipynb : t === "r" ? live.r : t === "csv" ? live.csv : null);
+          if (live && liveName) {
+            const err = performOpen(`${live.dir}/${liveName}`, host);
+            return err ?? `opening ${liveName} (live — it updates as the session advances)`;
+          }
+          return last
+            ? `the last export did not include ${t} — /export ${t} first`
+            : `the live mirror has no ${t} — /export ${t} for that`;
         }
       }
       return null;
     },
-    [pipe, doExport, start, running, sampleChoices, analysisChoices],
+    [pipe, doExport, start, running, sampleChoices, analysisChoices, liveUpdate],
   );
 
   // ── context each bot sees ───────────────────────────────────────────────
