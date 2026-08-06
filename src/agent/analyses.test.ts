@@ -103,6 +103,28 @@ describe("time-profile", () => {
   });
 });
 
+describe("numeric-summary", () => {
+  test("speaks the IDE's descriptive vocabulary, CV-ranked", () => {
+    const r = run("numeric-summary");
+    // The IDE result card's columns minus min/max (pane-width budget) —
+    // same names, same order, same @scelo/core numbers underneath.
+    expect(r.columns).toEqual(["column", "n", "miss %", "mean", "sd", "cv", "median"]);
+    // The fixture's numerics: premium, claims, age. All fully populated.
+    expect(r.rows.map((row) => row[0]).sort()).toEqual(["age", "claims", "premium"]);
+    for (const row of r.rows) expect(row[2]).toBe("0%");
+    // CV ordering is scale-free: premium (CV ≈ 0.40) leads age (≈ 0.32)
+    // despite both being "spready"; claims = 0.4 × premium is proportional,
+    // so it TIES premium's CV exactly and the sd tie-break keeps premium
+    // (the larger-scale column) first: premium, claims, age.
+    expect(r.rows.map((row) => row[0])).toEqual(["premium", "claims", "age"]);
+    const cvs = r.rows.map((row) => Number.parseFloat(String(row[5])));
+    expect(cvs[0]).toBeCloseTo(cvs[1], 5);
+    for (let i = 1; i < cvs.length; i++) expect(cvs[i]).toBeLessThanOrEqual(cvs[i - 1]);
+    // The histogram series follows the top-CV column, not column order.
+    expect(r.series?.label).toBe("premium distribution");
+  });
+});
+
 describe("correlation", () => {
   test("finds the designed-in premium↔claims relationship first", () => {
     const r = run("correlation");

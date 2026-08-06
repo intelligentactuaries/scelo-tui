@@ -17,7 +17,7 @@
 // or base R without translation loss.
 
 import type { CellValue, ColumnMeta, Dataset } from "@scelo/core";
-import { boxStats } from "@scelo/core";
+import { boxStats, profileNumericColumns } from "@scelo/core";
 import { type DatePoint, binPoints, chooseBin, parseDateUTC, spanDays } from "../core/dates";
 import { decileShares, gini, pearson, topShare } from "../core/stats";
 
@@ -120,24 +120,35 @@ export const MODELS: ModelChoice[] = [
     id: "numeric-summary",
     label: "Descriptive summary",
     applies: (m) => numericColumns(m).length > 0,
-    run: (_d, metas) => {
-      const nums = numericColumns(metas);
+    run: (d, metas) => {
+      // The SAME profile the IDE's descriptive report computes
+      // (@scelo/core's profileNumericColumns): type-7 quantiles, sample sd,
+      // CV — in the same CV-ranked (scale-free) order, so the two surfaces
+      // can never print different numbers for the same file. The columns
+      // are the IDE result card's, minus min/max: seven is what stays
+      // legible at this pane's width, the histogram series shows the range,
+      // and the outliers analysis owns the extremes. The exported script
+      // restates the full nine-column card.
+      const profiles = profileNumericColumns(d);
+      const gappy = profiles.filter((p) => p.missingPct > 0.1).length;
+      const lead = profiles[0];
+      const leadBins = lead ? metas.find((m) => m.name === lead.name)?.histogramBins : undefined;
       return {
-        headline: `${nums.length} numeric column${nums.length === 1 ? "" : "s"} described`,
-        columns: ["column", "n", "mean", "median", "p20", "p80", "min", "max"],
-        rows: nums.map((m) => [
-          m.name,
-          m.count - m.missing,
-          fmt(m.mean),
-          fmt(m.median),
-          fmt(m.quintiles?.[0]),
-          fmt(m.quintiles?.[3]),
-          fmt(m.min),
-          fmt(m.max),
+        headline:
+          `${profiles.length} numeric column${profiles.length === 1 ? "" : "s"} described, ` +
+          `widest relative spread first${gappy > 0 ? ` · ${gappy} >10% missing` : ""}`,
+        columns: ["column", "n", "miss %", "mean", "sd", "cv", "median"],
+        rows: profiles.map((p) => [
+          p.name,
+          p.count,
+          p.missing === 0 ? "0%" : `${(p.missingPct * 100).toFixed(1)}%`,
+          fmt(p.mean),
+          fmt(p.sd),
+          p.cv === null ? "—" : fmt(p.cv),
+          fmt(p.median),
         ]),
-        series: nums[0]?.histogramBins
-          ? { label: `${nums[0].name} distribution`, values: nums[0].histogramBins }
-          : undefined,
+        series:
+          lead && leadBins ? { label: `${lead.name} distribution`, values: leadBins } : undefined,
       };
     },
   },
