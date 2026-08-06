@@ -1,24 +1,34 @@
 // The greeting.
 //
 // Claude Code opens with a warm boxed hello and its little orange creature;
-// scelo's counterpart is an owl — the actuary's bird — in the same warm
-// orange. One component, two prominences: the full welcome box for the
-// landing screens, and the bare bird for anywhere smaller.
+// scelo's counterpart is its own brand mark — the SN Pro "S" from
+// ../scelo/brand/scelo_S0_1.svg — rendered as half-block terminal art
+// (each character cell carries two vertical pixels: ▀ ▄ █). The art is
+// baked rather than computed: regenerate with scripts/brandmark.py after a
+// brand change. Only the big S travels; the lockup's "0.1" subscript is
+// smaller than a terminal cell at this scale, so the text beside the mark
+// carries the name instead.
 //
-// The art sticks to plain ASCII glyphs (comma, parens, quotes) so it
-// renders identically in every font a terminal might use — box-drawing
-// creatures fall apart the moment a font lacks a glyph.
+// The brand file is white-on-charcoal; in a terminal the glyph wears the
+// welcome box's warm orange so the hello reads as one piece.
 
 import { Box, Text } from "ink";
 import type { ReactNode } from "react";
 import { theme } from "./theme";
 
-const OWL = [" ,___, ", " (o,o) ", " /)_)  ", '  " "  '] as const;
+const MARK = [
+  " ▄██████▄ ",
+  "██      ▀ ",
+  "▀██▄▄▄    ",
+  "   ▀▀▀▀██▄",
+  "▄▄      ██",
+  "▀▀██████▀ ",
+] as const;
 
-export function Owl(): ReactNode {
+export function BrandMark(): ReactNode {
   return (
     <Box flexDirection="column">
-      {OWL.map((line, i) => (
+      {MARK.map((line, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: fixed art, positional rows.
         <Text key={i} color={theme.mascot} bold>
           {line}
@@ -28,8 +38,8 @@ export function Owl(): ReactNode {
   );
 }
 
-/** The boxed hello: owl on the left, headline + up to three quiet lines on
- *  the right, wrapped in the mascot-orange rounded border. */
+/** The boxed hello: the S on the left, headline + quiet lines on the right,
+ *  wrapped in the mascot-orange rounded border. */
 export function Welcome({ lines }: { lines: string[] }): ReactNode {
   return (
     <Box
@@ -38,7 +48,7 @@ export function Welcome({ lines }: { lines: string[] }): ReactNode {
       paddingX={2}
       alignSelf="flex-start"
     >
-      <Owl />
+      <BrandMark />
       <Box flexDirection="column" marginLeft={2} justifyContent="center">
         <Text>
           <Text color={theme.mascot} bold>

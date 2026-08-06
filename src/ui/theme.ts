@@ -29,7 +29,7 @@ export const theme: {
   err: string;
   you: string;
   bot: string | undefined;
-  /** The mascot's warm orange — also the welcome box's border. */
+  /** The brand mark's warm orange — also the welcome box's border. */
   mascot: string;
 } = {
   /** Primary reading text — the terminal's own default foreground. */
