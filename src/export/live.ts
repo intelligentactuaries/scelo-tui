@@ -79,6 +79,9 @@ export function buildLiveR(snap: LiveSnapshot, now: Date, dataFile = "data.csv")
     "",
     `df <- read.csv(${q(dataFile)}, stringsAsFactors = FALSE)`,
     'message(sprintf("scelo: %d rows x %d cols loaded", nrow(df), ncol(df)))',
+    "# Browse the data with RStudio's viewer:  View(df)",
+    "# (Don't open the csv itself as a file — RStudio's source editor caps",
+    "#  out at 5 MB; the viewer handles any size.)",
     "",
   ];
   if (snap.runs.length === 0) {
