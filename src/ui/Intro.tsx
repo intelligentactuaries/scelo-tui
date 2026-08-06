@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { keyFor, loadConfig, maskKey, saveConfig } from "../agent/config";
 import { discoverModels, getActive, llmAvailable, reloadConfig } from "../agent/llm";
 import { PROVIDERS, type Provider, type ProviderId, type Selection } from "../agent/providers";
+import { Welcome } from "./Mascot";
 import { Working } from "./spinner";
 import { MIN_WIDTH, theme } from "./theme";
 
@@ -292,7 +293,14 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Box>
+      <Welcome
+        lines={[
+          "the agentic actuarial workstation — soft data → tools → hard data",
+          "pick the model that will drive it, then drop a CSV in",
+        ]}
+      />
+
+      <Box marginTop={1}>
         <Text color={theme.soft} bold>
           scelo
         </Text>
