@@ -10,7 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Dataset, summariseDataset } from "@scelo/core";
 import { openCommand } from "./handoff";
-import { type LiveSnapshot, buildLiveIpynb, buildLiveR, createLiveMirror } from "./live";
+import {
+  type LiveSnapshot,
+  buildLiveIpynb,
+  buildLiveR,
+  buildLiveWatchR,
+  createLiveMirror,
+} from "./live";
 
 const NOW = new Date("2026-08-06T12:00:00Z");
 
@@ -161,6 +167,20 @@ describe("buildLiveIpynb", () => {
   });
 });
 
+describe("buildLiveWatchR", () => {
+  test.skipIf(!HAVE_R)("parses in R itself", () => {
+    expect(rParses(buildLiveWatchR("/tmp/anywhere/book_live.R"))).toBe(true);
+  });
+
+  test("bakes the absolute target, degrades without `later`, and can stop", () => {
+    const src = buildLiveWatchR('/tmp/with "quotes"/book_live.R');
+    expect(src).toContain('target <- "/tmp/with \\"quotes\\"/book_live.R"');
+    expect(src).toContain('requireNamespace("later"');
+    expect(src).toContain("scelo_refresh");
+    expect(src).toContain("scelo_watch_stop");
+  });
+});
+
 describe("createLiveMirror", () => {
   test("writes atomically, rewrites scripts, writes the csv once per dataset", () => {
     const dir = mkdtempSync(join(tmpdir(), "scelo-live-"));
@@ -168,11 +188,18 @@ describe("createLiveMirror", () => {
     const [p0, p1] = phases().map(([, s]) => s);
 
     const first = mirror.update(p0, NOW);
-    expect(first.wrote.sort()).toEqual(["book_data.csv", "book_live.R", "book_live.ipynb"].sort());
+    expect(first.wrote.sort()).toEqual(
+      ["book_data.csv", "book_live.R", "book_live.ipynb", "book_live_watch.R"].sort(),
+    );
 
     const second = mirror.update(p1, NOW);
-    // Same dataset object → the csv is NOT rewritten; the scripts are.
+    // Same dataset object → the csv is NOT rewritten; the watcher is
+    // write-once; the scripts are rewritten.
     expect(second.wrote.sort()).toEqual(["book_live.R", "book_live.ipynb"].sort());
+    // The watcher points at the live script's absolute path.
+    expect(readFileSync(join(dir, "book_live_watch.R"), "utf8")).toContain(
+      join(dir, "book_live.R"),
+    );
 
     // No half-written temp files left behind — atomicity's visible residue.
     expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
