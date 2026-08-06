@@ -721,8 +721,20 @@ export function App({
             </>
           ) : (
             <Box flexDirection="column" marginTop={1}>
-              <Text color={theme.mute}>drag a CSV onto this window,</Text>
-              <Text color={theme.mute}>paste its path below and press ⏎,</Text>
+              {/* Inside RStudio, dropping a file on the window opens it in
+                  RStudio's own editor (and >5 MB hits its size dialog) — the
+                  drop never reaches this terminal, so don't suggest it. */}
+              {host.kind === "rstudio" ? (
+                <>
+                  <Text color={theme.mute}>paste a CSV's path below and press ⏎</Text>
+                  <Text color={theme.mute}>(don't drag — RStudio opens drops in its editor),</Text>
+                </>
+              ) : (
+                <>
+                  <Text color={theme.mute}>drag a CSV onto this window,</Text>
+                  <Text color={theme.mute}>paste its path below and press ⏎,</Text>
+                </>
+              )}
               <Text color={theme.mute}>or type /example for the IDE's sample data</Text>
             </Box>
           )}
@@ -859,7 +871,8 @@ const NO_DATA_CONTEXT = (pane: string) =>
     "How the user loads data:",
     "  /example        list the bundled sample datasets",
     "  /example 2      load one by number (a bare number works after the list)",
-    "  or drag a CSV onto the window, or paste its path and press enter",
+    "  or paste a CSV's path and press enter (drag-drop works in plain",
+    "  terminals; inside RStudio a drop opens ITS editor, so paste there)",
     "",
     "Be terse — 3 lines max.",
   ].join("\n");
