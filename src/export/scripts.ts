@@ -58,12 +58,39 @@ const R_PERIOD: Record<"month" | "quarter" | "year", (d: string) => string[]> = 
 function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
   switch (id) {
     case "numeric-summary":
+      // Mirrors the pane (and the IDE's descriptive report) stat for stat:
+      // sample sd (ddof=1 — pandas' and R's default), median by linear
+      // interpolation (type 7 — numpy's and R's default), missingness made
+      // visible, CV-ranked so scale never decides the order.
       return {
         py: [
-          "summary = df.describe(percentiles=[0.2, 0.4, 0.6, 0.8]).T",
-          "print(summary)",
+          'num = df.select_dtypes("number")',
+          "summary = pd.DataFrame({",
+          '    "n": num.count(),',
+          '    "miss_pct": (100 * num.isna().mean()).round(1),',
+          '    "mean": num.mean(),',
+          '    "sd": num.std(),',
+          '    "cv": num.std() / num.mean().abs(),',
+          '    "min": num.min(),',
+          '    "median": num.median(),',
+          '    "max": num.max(),',
+          "})",
+          'print(summary.sort_values("cv", ascending=False))',
         ],
-        r: ["print(summary(df))"],
+        r: [
+          "num <- df[sapply(df, is.numeric)]",
+          "summary_tbl <- data.frame(",
+          "  n = sapply(num, function(x) sum(!is.na(x))),",
+          "  miss_pct = round(100 * sapply(num, function(x) mean(is.na(x))), 1),",
+          "  mean = sapply(num, mean, na.rm = TRUE),",
+          "  sd = sapply(num, sd, na.rm = TRUE),",
+          "  min = sapply(num, min, na.rm = TRUE),",
+          "  median = sapply(num, median, na.rm = TRUE),",
+          "  max = sapply(num, max, na.rm = TRUE)",
+          ")",
+          "summary_tbl$cv <- summary_tbl$sd / abs(summary_tbl$mean)",
+          'print(summary_tbl[order(-summary_tbl$cv), c("n", "miss_pct", "mean", "sd", "cv", "min", "median", "max")])',
+        ],
         pyPlot: ['df.select_dtypes("number").iloc[:, :6].hist(bins=30, figsize=(10, 6))'],
       };
     case "group-metric": {
