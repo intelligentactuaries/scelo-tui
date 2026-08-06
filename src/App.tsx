@@ -24,7 +24,8 @@ import { type LiveMirror, type LiveRun, createLiveMirror } from "./export/live";
 import { slugify } from "./export/sce";
 import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
 import { COMMAND_NAMES, helpText } from "./ui/commands";
-import { isMouseReport, swallowingMouseBytes, useMouse } from "./ui/mouse";
+import { extractDataPath } from "./core/ingest";
+import { isMouseReport, stripMouseNoise, swallowingMouseBytes, useMouse } from "./ui/mouse";
 import { paneWidths, useTerminalSize } from "./ui/size";
 import { Spinner, Working } from "./ui/spinner";
 import { MIN_HEIGHT, MIN_WIDTH, theme } from "./ui/theme";
@@ -627,11 +628,15 @@ export function App({
     }
     if (key.return) {
       const text = active.draft.trim();
-      // A bare path typed or dragged into any pane starts a run — that is the
+      // A path typed or dragged into any pane starts a run — that is the
       // "drop a file in" gesture, and it should work from wherever you are.
-      if (looksLikePath(text)) {
+      // extractDataPath ignores everything AROUND the path (drag gestures
+      // bracket it with mouse-report bytes) while leaving prose that merely
+      // mentions a file to the chat.
+      const dropped = extractDataPath(text);
+      if (dropped) {
         active.setDraft("");
-        void start(text);
+        void start(dropped);
         return;
       }
       active.submit();
@@ -641,7 +646,13 @@ export function App({
       active.setDraft(active.draft.slice(0, -1));
       return;
     }
-    if (input && !key.ctrl && !key.meta && !key.escape) active.setDraft(active.draft + input);
+    if (input && !key.ctrl && !key.meta && !key.escape) {
+      // Belt to the chunk classifier's braces: report bytes that slipped
+      // through with their ESC[< prefix already consumed must never become
+      // typing.
+      const clean = stripMouseNoise(input);
+      if (clean) active.setDraft(active.draft + clean);
+    }
   });
 
   if (cols < MIN_WIDTH || rows < MIN_HEIGHT) {
@@ -837,12 +848,6 @@ export function App({
   );
 }
 
-/** A typed/pasted line that is a file path rather than a question. Kept
- *  narrow: it must not swallow a genuine question that happens to contain a
- *  slash, so it requires a data-file extension. */
-function looksLikePath(s: string): boolean {
-  return /\.(csv|tsv|txt)['"]?$/i.test(s.trim()) && !/\s\?$/.test(s);
-}
 
 /**
  * What a bot is told when there is nothing to talk about yet.
