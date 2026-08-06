@@ -25,6 +25,7 @@ import { slugify } from "./export/sce";
 import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
 import { COMMAND_NAMES, helpText } from "./ui/commands";
 import { extractDataPath } from "./core/ingest";
+import { Welcome } from "./ui/Mascot";
 import { isMouseReport, stripMouseNoise, swallowingMouseBytes, useMouse } from "./ui/mouse";
 import { paneWidths, useTerminalSize } from "./ui/size";
 import { Spinner, Working } from "./ui/spinner";
@@ -732,6 +733,8 @@ export function App({
             </>
           ) : (
             <Box flexDirection="column" marginTop={1}>
+              <Welcome lines={["your data's whole journey, three panes wide"]} />
+              <Box marginTop={1} />
               {/* Inside RStudio, dropping a file on the window opens it in
                   RStudio's own editor (and >5 MB hits its size dialog) — the
                   drop never reaches this terminal, so don't suggest it. */}
