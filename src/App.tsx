@@ -453,10 +453,10 @@ export function App({
           ];
           if (f) {
             const where = relative(process.cwd(), f.dir);
+            const prefix = host.kind === "rstudio" || !where ? "" : `${where}/`;
             lines.push(
-              host.kind === "rstudio"
-                ? `RStudio: run  source("${f.r}")  in the console any time — re-run it for new sections`
-                : `R: source("${where ? `${where}/` : ""}${f.r}") · re-run any time for new sections`,
+              `RStudio: paste  source("${prefix}${f.watch}")  once — after that, every update runs itself in the console (scelo_watch_stop() to stop)`,
+              `manual alternative: source("${prefix}${f.r}") re-runs the session on demand`,
               `Jupyter: /open notebook — reload when it offers "file changed on disk"`,
             );
           } else {

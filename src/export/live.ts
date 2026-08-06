@@ -26,7 +26,7 @@
 // Cell ids in the notebook are stable across rewrites (cellMaker starts at
 // cell-0 every build), which keeps Jupyter's reload diff sane.
 
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ColumnMeta, Dataset } from "@scelo/core";
 import type { PipelineResult } from "../agent/pipeline";
@@ -153,13 +153,87 @@ export function buildLiveIpynb(snap: LiveSnapshot, now: Date, dataFile = "data.c
   return wrapNotebook(cells);
 }
 
+// ── the RStudio watcher ───────────────────────────────────────────────────
+//
+// The piece that turns the mirror from "re-source when you remember" into
+// automation: a tiny script the user sources ONCE in the RStudio console.
+// It polls the live script's mtime (1s) via `later` timers — which RStudio's
+// console event loop pumps while idle — and re-source()s on every change, so
+// each TUI advance prints its new sections in the console by itself.
+//
+// Design constraints, in order:
+//   • sourcing it twice must not double-run anything — a generation flag in
+//     the global env retires the previous watcher first;
+//   • no hard dependency: without `later` it degrades to a one-keystroke
+//     scelo_refresh() instead of failing;
+//   • the target path is baked ABSOLUTE. This file is session-local glue,
+//     not a portable export — absolute is what makes source() work no
+//     matter where the RStudio project's working directory points.
+export function buildLiveWatchR(targetAbsPath: string): string {
+  return [
+    "# scelo live watch — source this ONCE in the RStudio console.",
+    "#",
+    "# From then on, every time scelo advances the session, the live script",
+    "# re-runs here automatically: new analysis sections print in this",
+    "# console as the TUI produces them. Stop with  scelo_watch_stop()",
+    "#",
+    '# Auto-refresh needs the `later` package (install.packages("later")).',
+    "# Without it, this defines  scelo_refresh()  for manual refreshes.",
+    "",
+    "local({",
+    `  target <- ${q(targetAbsPath)}`,
+    "  run <- function() {",
+    "    tryCatch(source(target), error = function(e) {",
+    '      message("scelo: live script failed - ", conditionMessage(e))',
+    "    })",
+    "  }",
+    "  # Re-sourcing this file replaces any previous watcher instead of",
+    "  # stacking a second timer loop on top of it.",
+    '  if (exists(".scelo_watch_state", envir = globalenv(), inherits = FALSE)) {',
+    '    get(".scelo_watch_state", envir = globalenv())$on <- FALSE',
+    "  }",
+    '  if (!requireNamespace("later", quietly = TRUE)) {',
+    '    assign("scelo_refresh", run, envir = globalenv())',
+    "    message(",
+    '      "scelo: `later` is not installed, so no auto-refresh. ",',
+    '      "Run scelo_refresh() after each TUI step, or install.packages(\\"later\\") ",',
+    '      "and source this file again."',
+    "    )",
+    "    run()",
+    "    return(invisible())",
+    "  }",
+    "  state <- new.env(parent = emptyenv())",
+    "  state$on <- TRUE",
+    "  state$mtime <- -1",
+    '  assign(".scelo_watch_state", state, envir = globalenv())',
+    '  assign("scelo_watch_stop", function() {',
+    "    state$on <- FALSE",
+    '    message("scelo: live watch stopped")',
+    '  }, envir = globalenv())',
+    "  tick <- function() {",
+    "    if (!isTRUE(state$on)) return(invisible())",
+    "    mt <- suppressWarnings(as.numeric(file.info(target)$mtime))",
+    "    if (!is.na(mt) && mt > state$mtime) {",
+    "      state$mtime <- mt",
+    '      message("scelo: update at ", format(Sys.time(), "%H:%M:%S"), " - running the live script")',
+    "      run()",
+    "    }",
+    "    later::later(tick, 1)",
+    "  }",
+    '  message("scelo: watching ", basename(target), " - updates run here automatically (scelo_watch_stop() to stop)")',
+    "  tick()",
+    "})",
+    "",
+  ].join("\n");
+}
+
 // ── the writer ────────────────────────────────────────────────────────────
 
 export type LiveMirror = {
   /** Rewrite the live files from this snapshot. Returns what was written. */
   update(snap: LiveSnapshot, now?: Date): { dir: string; wrote: string[] };
   /** The mirror's fixed paths, for hints and /open. */
-  files(): { dir: string; r: string; ipynb: string; csv: string };
+  files(): { dir: string; r: string; ipynb: string; csv: string; watch: string };
 };
 
 /** Same layout contract as exportArtifacts: "flat" writes stem-prefixed
@@ -180,6 +254,7 @@ export function createLiveMirror(opts: {
   const rName = name("live.R");
   const nbName = name("live.ipynb");
   const csvName = name("data.csv");
+  const watchName = name("live_watch.R");
 
   // The dataset is written once per identity, not once per update — the
   // pipeline hands the SAME object through every post-clean snapshot, and
@@ -202,11 +277,18 @@ export function createLiveMirror(opts: {
         lastDataset = snap.dataset;
         wrote.push(csvName);
       }
+      // The watcher's content never changes (it carries only the target
+      // path), so it is written once — rewriting it would bump its mtime
+      // for no reason and confuse anyone watching the directory.
+      if (!existsSync(join(dir, watchName))) {
+        writeAtomic(watchName, buildLiveWatchR(join(dir, rName)));
+        wrote.push(watchName);
+      }
       writeAtomic(rName, buildLiveR(snap, now, csvName));
       writeAtomic(nbName, buildLiveIpynb(snap, now, csvName));
       wrote.push(rName, nbName);
       return { dir, wrote };
     },
-    files: () => ({ dir, r: rName, ipynb: nbName, csv: csvName }),
+    files: () => ({ dir, r: rName, ipynb: nbName, csv: csvName, watch: watchName }),
   };
 }
