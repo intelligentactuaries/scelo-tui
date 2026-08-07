@@ -2,6 +2,9 @@
 
 import { Box, Text } from "ink";
 import type { ReactNode } from "react";
+import { fmtCompact, seriesFormat } from "./charts";
+import type { DiagramLine } from "./diagram";
+import { mouseActive } from "./mouse";
 import { theme } from "./theme";
 
 /** One column of the three-pane layout. Focus is shown on the border rather
@@ -50,9 +53,17 @@ export function Head({ children }: { children: ReactNode }) {
   );
 }
 
-/** Horizontal bar chart. Braille and block glyphs are the only plotting a
- *  terminal has; blocks are used because they degrade to a solid rectangle
- *  in fonts without fine braille coverage, where braille degrades to boxes. */
+/**
+ * The pane's sparkline: a horizontal bar chart in forty columns and five
+ * rows, which is all a third of the screen has to spare once the table, the
+ * rationale and the chat have taken theirs. `/charts` draws the same series
+ * properly — with axes, nice ticks and sub-cell resolution — so this one
+ * only has to say which bar is the big one.
+ *
+ * Blocks rather than braille for the same reason charts.ts uses them for
+ * bars: they degrade to a solid rectangle in fonts without fine braille
+ * coverage, where braille degrades to boxes.
+ */
 export function BarPlot({
   values,
   labels,
@@ -69,6 +80,10 @@ export function BarPlot({
   const shown = values.slice(0, max);
   if (shown.length === 0) return null;
   const peak = Math.max(...shown, 1);
+  // Series-wide precision, not per value: `fmtCompact` alone labelled a
+  // correlation screen 0.9 / 0 / 0 / 0, printing the same number beside
+  // three different pairs.
+  const fmt = seriesFormat(shown);
   const labelW = labels ? Math.min(14, Math.max(...labels.slice(0, max).map((l) => l.length))) : 0;
   const barW = Math.max(4, width - labelW - 10);
   return (
@@ -84,7 +99,7 @@ export function BarPlot({
               </Text>
             )}
             <Text color={color}>{"█".repeat(filled)}</Text>
-            <Text color={theme.mute}> {fmtCompact(v)}</Text>
+            <Text color={theme.mute}> {fmt(v)}</Text>
           </Box>
         );
       })}
@@ -92,17 +107,49 @@ export function BarPlot({
   );
 }
 
-/** Fixed-width text table, truncated to the pane. */
+/** A laid-out node/edge diagram. All the thinking happened in diagram.ts —
+ *  this is the loop that hands its spans to Ink. */
+export function Diagram({ lines }: { lines: DiagramLine[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <Box flexDirection="column">
+      {lines.map((line, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: positional by nature
+        <Text key={i} wrap="truncate">
+          {line.map((s, j) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: positional by nature
+            <Text key={j} color={s.color} bold={s.bold}>
+              {s.text}
+            </Text>
+          ))}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+/**
+ * Fixed-width text table, truncated to the pane.
+ *
+ * The footer line is a button: clicking "… 3 more" expands the table (the
+ * mapping lives in App.tsx, which owns the mouse and can count the row). So
+ * it says so — an affordance nobody can see is not one — but only while
+ * mouse reporting is actually on, because `/mouse off` is a setting /help
+ * recommends and a hint that lies is worse than none.
+ */
 export function Table({
   columns,
   rows,
   width,
   maxRows = 6,
+  expanded = false,
 }: {
   columns: string[];
   rows: Array<Array<string | number>>;
   width: number;
   maxRows?: number;
+  /** Drawn open, so the footer offers the way back rather than more rows. */
+  expanded?: boolean;
 }) {
   if (columns.length === 0) return null;
   const shown = rows.slice(0, maxRows);
@@ -121,11 +168,23 @@ export function Table({
       {shown.map((r, ri) => (
         <Text key={ri}>{r.map((c, i) => cut(String(c ?? ""), w[i])).join(" ")}</Text>
       ))}
-      {rows.length > shown.length && (
-        <Text color={theme.mute}>… {rows.length - shown.length} more</Text>
+      {(expanded || rows.length > shown.length) && (
+        <Text color={theme.mute} wrap="truncate">
+          {tableFooter(rows.length - shown.length, expanded, mouseActive())}
+        </Text>
       )}
     </Box>
   );
+}
+
+/** The footer's wording, kept out of the JSX so the four states are legible
+ *  as four states. Exported for the test that pins them. */
+export function tableFooter(hidden: number, expanded: boolean, clickable: boolean): string {
+  const more = hidden > 0 ? `… ${hidden} more` : "";
+  if (!expanded) {
+    return clickable ? `${more} · click to expand` : `${more} · /mouse on to expand`;
+  }
+  return more === "" ? "▴ click to collapse" : `${more} · ▴ click to collapse`;
 }
 
 /** Wrap text to a width without splitting words. Ink wraps for us, but the
@@ -172,11 +231,4 @@ export function Prose({
   );
 }
 
-export function fmtCompact(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  const a = Math.abs(n);
-  if (a >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-  if (a >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (a >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
-  return String(Math.round(n * 10) / 10);
-}
+export { fmtCompact };
