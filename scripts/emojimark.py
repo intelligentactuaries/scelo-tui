@@ -14,9 +14,15 @@ black one without a rectangle of the wrong colour around it.
 
     python3 scripts/emojimark.py [emoji] [rows]     # default 🤓, 6
 
-Prints the MARK literal to paste into src/ui/Mascot.tsx, and writes a
-scaled-up PNG preview next to it so the result can be looked at rather than
-imagined. Requires Pillow and Noto Color Emoji.
+Mascot.tsx holds a LADDER of these, one per size, and picks the widest that
+fits its container — so a change means regenerating every rung, not just the
+big one. The shipped set is 18, 13, 9 and 7 rows requested, which come out as
+16x36, 12x26, 8x18 and 6x14 after the transparent border is trimmed. Rungs
+are named for their WIDTH, since width is what the containers run out of.
+
+Prints the literal to paste into src/ui/Mascot.tsx, and writes a scaled-up
+PNG preview next to it so the result can be looked at rather than imagined.
+Requires Pillow and Noto Color Emoji.
 """
 
 import sys
