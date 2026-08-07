@@ -1256,6 +1256,11 @@ export function App({
   // starts (eight when a column was dropped), then a blank, and Prose adds a
   // "…" row of its own when it clips.
   const softFixed = 7 + (p?.clean && p.clean.droppedColumns.length > 0 ? 1 : 0);
+  // The empty state's budget, which is a different shape: the "file(s)" head
+  // (2), a blank, the greeting, another blank, and the four lines telling you
+  // how to load something. The greeting gets what the hints leave, and the
+  // hints win — they are the actionable part; the greeting is decoration.
+  const welcomeRows = softRoom - 2 - 1 - 1 - 4;
   // The block costs its own blank row and the "…" Prose adds when it clips,
   // so two rows buy nothing: below that it does not appear at all rather
   // than appearing on top of the pane's border.
@@ -1485,7 +1490,19 @@ export function App({
               {/* The tagline lives on the hint lines just below the box in
                   this pane, so the box itself carries only the hello — at 42
                   usable columns there is no room for both beside the mark. */}
-              <Welcome width={softW} lines={[]} />
+              {/* Stacked, SOFT is a third of the screen and the mark is 16
+                  rows at its largest — passing only a width picks a rung
+                  that fits across and not down, and Ink answers an
+                  overflowing pane by squashing its children rather than
+                  saying so. Below the smallest rung the greeting is a line
+                  of text: still a hello, and it costs one row. */}
+              {welcomeRows >= 8 ? (
+                <Welcome width={softW} maxRows={welcomeRows - 2} lines={[]} />
+              ) : (
+                <Text color={theme.mascot} bold>
+                  ✻ Welcome to Scelo!
+                </Text>
+              )}
               <Box marginTop={1} />
               {/* Inside RStudio, dropping a file on the window opens it in
                   RStudio's own editor (and >5 MB hits its size dialog) — the
