@@ -73,8 +73,14 @@ export function binPoints(points: DatePoint[], bin: DateBin, weights?: number[])
     const key = binKey(points[i], bin);
     const cur = acc.get(key) ?? { count: 0, sum: 0 };
     cur.count++;
+    // No weights at all means `sum` tracks the count. But a weight that is
+    // SUPPLIED and non-finite (the value column is null for this row) must
+    // contribute 0 — falling back to 1 there quietly adds a record count
+    // into a column labelled "<value> total", so a bucket whose values were
+    // all missing reported a money total equal to its row count.
     const w = weights?.[i];
-    cur.sum += w !== undefined && Number.isFinite(w) ? w : 1;
+    if (weights === undefined) cur.sum += 1;
+    else if (w !== undefined && Number.isFinite(w)) cur.sum += w;
     acc.set(key, cur);
   }
   const keys = [...acc.keys()].sort();

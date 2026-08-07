@@ -108,10 +108,118 @@ export function isMouseReport(input: string): boolean {
   return /(?:\x1b)?\[<\d+;\d+;\d+[Mm]/.test(input);
 }
 
+/**
+ * A report that arrived TRUNCATED and was flushed as ordinary input.
+ *
+ * The swallow flag only covers events Ink dispatches synchronously for the
+ * chunk that set it. When a terminal splits an SGR report across two reads
+ * (RStudio's xterm.js does), Ink holds the incomplete `\x1b[<0;100;10` as a
+ * pending escape and emits it as a plain input event ~20ms later, by which
+ * time the flag is long cleared — so `[<0;100;10` gets typed into whatever
+ * pane had focus. Neither `isMouseReport` nor `stripMouseNoise` catches it:
+ * both demand the complete `digits;digits;digits[Mm]` form.
+ *
+ * Nobody types `[<` followed by only digits and semicolons, so recognising
+ * the prefix is safe. Only consulted while reporting is actually on.
+ */
+export function isMouseFragment(input: string): boolean {
+  return /^(?:\x1b)?\[<[\d;]*[Mm]?$/.test(input);
+}
+
 /** Opt out for terminals where mouse reporting fights something else, or for
  *  anyone who would rather keep native click-drag selection. */
 export function mouseEnabled(): boolean {
   return process.env.SCELO_TUI_MOUSE !== "0";
+}
+
+// ── the copy/paste trade ──────────────────────────────────────────────────
+//
+// While mouse reporting is on, the terminal routes button events to US, so
+// dragging no longer selects text: in most emulators copying needs shift-drag
+// (GNOME/VTE, xterm, Konsole, Windows Terminal, iTerm all honour shift as the
+// bypass). That is a real cost for a data tool, where copying a column name
+// or a number out of a pane is routine — so it has to be revocable AT RUNTIME
+// rather than only by restarting with SCELO_TUI_MOUSE=0. `/mouse off` turns
+// reporting off and hands click-drag selection straight back to the terminal;
+// tab still moves between panes, so nothing becomes unreachable.
+
+/** Runtime override from `/mouse`. null means "follow the environment". */
+let userWants: boolean | null = null;
+/** Set by the hook so the command can re-arm without a re-render. */
+let applyMode: ((on: boolean) => void) | null = null;
+
+export function mouseActive(): boolean {
+  return userWants ?? mouseEnabled();
+}
+
+/** Turn reporting on/off now. Returns the state actually reached — a
+ *  non-TTY (or SCELO_TUI_MOUSE=0) cannot be turned on. */
+export function setMouseActive(on: boolean): boolean {
+  const reachable = on && mouseEnabled();
+  // Record what was REACHED, not what was wished for: storing an impossible
+  // `true` made mouseActive() report "on" for a session where reporting can
+  // never be enabled, so the next bare `/mouse` toggled it "off" and
+  // announced a change that never happened.
+  userWants = reachable;
+  applyMode?.(reachable);
+  return reachable;
+}
+
+// ── the bracketed-paste deadlock hatch ────────────────────────────────────
+//
+// Ink's input parser buffers everything after `ESC[200~` until the matching
+// `ESC[201~` arrives, emitting NO events meanwhile. If the end marker never
+// comes — an ssh drop or an emulator crash mid-paste — every later keystroke
+// is swallowed forever, and because raw mode means ctrl-c raises no SIGINT,
+// even quitting is gone: the app can only be killed from another terminal.
+//
+// This listener sits AHEAD of Ink's and sees the raw bytes regardless, so it
+// can still honour ctrl-c. It is a hatch, not a paste implementation: it only
+// notices that a paste opened and never closed, and only acts on \x03.
+
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+let pasteOpen = false;
+
+export function watchPasteDeadlock(chunk: string): void {
+  const lastStart = chunk.lastIndexOf(PASTE_START);
+  const lastEnd = chunk.lastIndexOf(PASTE_END);
+  if (lastStart !== -1 || lastEnd !== -1) pasteOpen = lastStart > lastEnd;
+  // ctrl-c inside a paste body is legitimate clipboard content; ctrl-c in a
+  // chunk of its own, while a paste has been hanging open, is a person
+  // trying to leave.
+  if (pasteOpen && chunk === "\x03") {
+    disableOnce();
+    process.stdout.write(`${PASTE_END}\x1b[?2004l`);
+    process.exit(130);
+  }
+}
+
+/** Test seam — the flag is module state that survives between chunks. */
+export function resetPasteWatch(): void {
+  pasteOpen = false;
+}
+
+/**
+ * Install the hatch. Its own effect, deliberately: it used to ride on the
+ * mouse listener, which meant `SCELO_TUI_MOUSE=0` — the setting /help
+ * recommends to anyone whose terminal fights mouse reporting — removed the
+ * only way out of a truncated paste. The two have nothing to do with each
+ * other.
+ */
+export function usePasteDeadlockHatch(): void {
+  useEffect(() => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) return;
+    const onData = (data: Buffer | string) => {
+      watchPasteDeadlock(typeof data === "string" ? data : data.toString("utf8"));
+    };
+    stdin.prependListener("data", onData);
+    return () => {
+      stdin.removeListener("data", onData);
+      pasteOpen = false;
+    };
+  }, []);
 }
 
 let mouseOn = false;
@@ -143,8 +251,23 @@ export function useMouse(onClick: (c: Click) => void, enabled = true): void {
     const stdin = process.stdin;
     if (!stdin.isTTY) return;
 
-    process.stdout.write(ENABLE);
-    mouseOn = true;
+    const enable = () => {
+      if (mouseOn) return;
+      process.stdout.write(ENABLE);
+      mouseOn = true;
+    };
+    // `mouseActive()`, not an unconditional enable: ctrl-o unmounts the panes
+    // for the model picker and mounts them again on the way back, and a
+    // remount used to silently undo `/mouse off` — taking click-drag text
+    // selection away from someone who had just asked for it.
+    if (mouseActive()) enable();
+    // `/mouse off` writes DISABLE without tearing this effect down: the
+    // listener stays attached (it costs nothing when no reports arrive) so
+    // `/mouse on` is a single write rather than a remount.
+    applyMode = (on: boolean) => {
+      if (on) enable();
+      else disableOnce();
+    };
 
     const classify = makeChunkClassifier();
     const onData = (data: Buffer | string) => {
@@ -176,6 +299,7 @@ export function useMouse(onClick: (c: Click) => void, enabled = true): void {
     process.on("SIGHUP", onSignal);
 
     return () => {
+      applyMode = null;
       stdin.removeListener("data", onData);
       process.off("exit", disableOnce);
       process.off("SIGINT", onSignal);

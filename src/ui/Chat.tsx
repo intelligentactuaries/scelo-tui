@@ -7,7 +7,7 @@
 // simultaneously is exactly where that becomes visible as flicker.
 
 import { Box, Text } from "ink";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type LlmMessage, stream } from "../agent/llm";
 import { type Command, commandMenu } from "./commands";
 import { Working } from "./spinner";
@@ -41,6 +41,9 @@ export type Turn = {
    * See `historyFor`.
    */
   local?: true;
+  /** Identity for the in-flight streamed turn, so its writer can find it
+   *  again after another turn has been appended behind its back. */
+  tag?: symbol;
 };
 
 /** Turns kept per pane. The panes are short, and an unbounded transcript in
@@ -55,6 +58,25 @@ const HISTORY_TURNS = 8;
 /** Longest single turn replayed. One pasted stack trace should not evict the
  *  rest of the conversation from the context window. */
 const HISTORY_CHARS = 1200;
+
+/** Prompt lines remembered per pane for ↑↓ recall. */
+const HIST_MAX = 50;
+
+/** Back over spaces, then over the word — where ctrl-w and alt-b land. */
+function prevWordStart(text: string, from: number): number {
+  let i = from;
+  while (i > 0 && text[i - 1] === " ") i--;
+  while (i > 0 && text[i - 1] !== " ") i--;
+  return i;
+}
+
+/** Forward over spaces, then over the word — alt-f. */
+function nextWordEnd(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && text[i] === " ") i++;
+  while (i < text.length && text[i] !== " ") i++;
+  return i;
+}
 
 /**
  * Prior turns as model messages.
@@ -93,6 +115,8 @@ function historyFor(turns: Turn[]): LlmMessage[] {
 export type ChatHandle = {
   turns: Turn[];
   draft: string;
+  /** Caret position in the draft, 0..draft.length. */
+  cursor: number;
   busy: boolean;
   /** When the in-flight request started, epoch ms; null when idle. Drives the
    *  elapsed counter, which is the part that separates "slow" from "hung". */
@@ -102,6 +126,42 @@ export type ChatHandle = {
    *  it, because setDraft-then-submit in one tick would submit the OLD draft
    *  (submit closes over the state, which has not re-rendered yet). */
   submit: (override?: string) => void;
+
+  // ── line editing ────────────────────────────────────────────────────────
+  // The composer is a readline, not an append-only buffer: type anywhere,
+  // not just at the end. Every mutation goes through one path so the caret
+  // can never leave the text.
+  insert: (s: string) => void;
+  /** Insert a self-contained token — a dropped path — keeping it a separate
+   *  word, so it cannot fuse with whatever was already at the caret. */
+  insertToken: (s: string) => void;
+  /** Delete before the caret (backspace). */
+  backspace: () => void;
+  /** Delete AT the caret (ctrl-d / forward delete). */
+  del: () => void;
+  moveCursor: (delta: number) => void;
+  cursorHome: () => void;
+  cursorEnd: () => void;
+  wordLeft: () => void;
+  wordRight: () => void;
+  /** ctrl-u: kill back to the start of the line. */
+  killToStart: () => void;
+  /** ctrl-k: kill to the end of the line. */
+  killToEnd: () => void;
+  /** ctrl-w: kill the word before the caret. */
+  killWord: () => void;
+
+  // ── prompt history ──────────────────────────────────────────────────────
+  // ↑ recalls what was sent before, ↓ walks back toward the draft that was
+  // in progress. Editing a recalled line detaches the walk, shell-style.
+  histPrev: () => void;
+  histNext: () => void;
+  /** True while ↑↓ are walking history — the `/` menu must not steal the
+   *  arrows mid-walk just because a recalled command re-opened it. */
+  histActive: boolean;
+  /** Record a line that bypassed submit() — the dropped-path load in App
+   *  submits by starting the pipeline, and ↑ should still offer it. */
+  noteHistory: (text: string) => void;
 
   // ── the `/` menu ────────────────────────────────────────────────────────
   /** Commands matching the draft, or null when no menu should show. */
@@ -128,7 +188,13 @@ export type ChatHandle = {
   choiceAccept: () => void;
   /** Esc: up one level, or close at the top. */
   choiceBack: () => void;
+  /** Close the picker outright, however deep and however filtered. Distinct
+   *  from choiceBack, which is Esc: one step back, filter first. */
+  closeChoices: () => void;
   choiceType: (ch: string) => void;
+  /** Filter by `text` and accept the first match, atomically — for a chunk
+   *  where a keystroke and its Enter arrived together. */
+  choiceTypeAccept: (text: string) => void;
   choiceBackspace: () => void;
   /** Push a turn without calling the model — used by the pipeline to narrate
    *  itself into the pane it belongs to. */
@@ -144,9 +210,20 @@ export function useChat(args: {
   onLocal?: (text: string) => string | null;
 }): ChatHandle {
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [draft, setDraft] = useState("");
+  // Draft and caret move as one value — a caret outside the text is
+  // impossible by construction rather than by clamping at every call site.
+  const [line, setLine] = useState<{ text: string; cur: number }>({ text: "", cur: 0 });
+  const draft = line.text;
+  const cur = line.cur;
   const [busy, setBusy] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
+  // Sent lines, oldest first, adjacent duplicates collapsed. A ref: pushing
+  // to history must not re-render three panes.
+  const hist = useRef<string[]>([]);
+  /** Where ↑↓ are in the walk; null means "not walking". */
+  const [histIdx, setHistIdx] = useState<number | null>(null);
+  /** The in-progress draft, parked while ↑ shows older lines. */
+  const stash = useRef("");
   // Esc closes the menu for the command being typed. It reopens only once
   // the draft stops being that command — otherwise every keystroke after Esc
   // would pop it straight back up.
@@ -166,6 +243,125 @@ export function useChat(args: {
   const turnsRef = useRef<Turn[]>(turns);
   turnsRef.current = turns;
 
+  // ── the draft line ──────────────────────────────────────────────────────
+  /** Programmatic sets: submit's clear, menu completion, history recall.
+   *  Unless the change IS a recall, it detaches any history walk, so
+   *  editing a recalled line makes it yours. */
+  const apply = useCallback((text: string, at: number, opts?: { recall?: boolean }) => {
+    setLine({ text, cur: Math.max(0, Math.min(at, text.length)) });
+    setMenuIndex(0);
+    if (!opts?.recall) setHistIdx(null);
+  }, []);
+
+  const setDraft = useCallback((next: string) => apply(next, next.length), [apply]);
+
+  /** Keystroke edits. Functional, never from the render's closure: keys can
+   *  arrive faster than re-renders (a paste, held-down arrows), and an edit
+   *  built on a stale draft silently drops the keys that came between. */
+  const edit = useCallback((fn: (text: string, cur: number) => { text: string; cur: number }) => {
+    setLine((l) => {
+      const n = fn(l.text, l.cur);
+      return { text: n.text, cur: Math.max(0, Math.min(n.cur, n.text.length)) };
+    });
+    setMenuIndex(0);
+    setHistIdx(null);
+  }, []);
+
+  const insert = useCallback(
+    (s: string) => edit((t, c) => ({ text: t.slice(0, c) + s + t.slice(c), cur: c + s.length })),
+    [edit],
+  );
+  const insertToken = useCallback(
+    (s: string) =>
+      edit((t, c) => {
+        // A leading space when the caret follows a word: dropping a file onto
+        // a half-typed line must not glue the path to it ("/exp" + a path is
+        // one nonexistent token, and Enter would report "no such file").
+        const before = t.slice(0, c);
+        const ins = `${before === "" || /\s$/.test(before) ? "" : " "}${s} `;
+        return { text: before + ins + t.slice(c), cur: c + ins.length };
+      }),
+    [edit],
+  );
+  const backspace = useCallback(
+    () => edit((t, c) => (c === 0 ? { text: t, cur: c } : { text: t.slice(0, c - 1) + t.slice(c), cur: c - 1 })),
+    [edit],
+  );
+  const del = useCallback(
+    () => edit((t, c) => ({ text: t.slice(0, c) + t.slice(c + 1), cur: c })),
+    [edit],
+  );
+  // Caret-only moves: no menu or history side effects, so they go straight
+  // to the state rather than through `edit`.
+  const moveCursor = useCallback((delta: number) => {
+    setLine((l) => ({ ...l, cur: Math.max(0, Math.min(l.cur + delta, l.text.length)) }));
+  }, []);
+  const cursorHome = useCallback(() => setLine((l) => ({ ...l, cur: 0 })), []);
+  const cursorEnd = useCallback(() => setLine((l) => ({ ...l, cur: l.text.length })), []);
+  const wordLeft = useCallback(() => {
+    setLine((l) => ({ ...l, cur: prevWordStart(l.text, l.cur) }));
+  }, []);
+  const wordRight = useCallback(() => {
+    setLine((l) => ({ ...l, cur: nextWordEnd(l.text, l.cur) }));
+  }, []);
+  const killToStart = useCallback(() => edit((t, c) => ({ text: t.slice(c), cur: 0 })), [edit]);
+  const killToEnd = useCallback(() => edit((t, c) => ({ text: t.slice(0, c), cur: c })), [edit]);
+  const killWord = useCallback(
+    () =>
+      edit((t, c) => {
+        const from = prevWordStart(t, c);
+        return { text: t.slice(0, from) + t.slice(c), cur: from };
+      }),
+    [edit],
+  );
+
+  // Esc closes the menu for the command being typed; it re-arms once the
+  // draft stops being that command. An effect rather than a check inside
+  // every mutator: the mutators no longer know the next text up front.
+  useEffect(() => {
+    if (!draft.startsWith("/")) setDismissed(false);
+  }, [draft]);
+
+  // ── prompt history ──────────────────────────────────────────────────────
+  const noteHistory = useCallback((text: string) => {
+    const t = text.trim();
+    if (t === "") return;
+    const h = hist.current;
+    // Adjacent duplicates collapse (shell-style): ↑ after three identical
+    // sends should reach the line BEFORE them on the second press.
+    if (h[h.length - 1] !== t) {
+      h.push(t);
+      if (h.length > HIST_MAX) h.splice(0, h.length - HIST_MAX);
+    }
+  }, []);
+
+  const histPrev = useCallback(() => {
+    const h = hist.current;
+    if (h.length === 0) return;
+    if (histIdx === null) {
+      // Entering the walk parks the draft, so ↓ can bring it back intact.
+      stash.current = draft;
+      setHistIdx(h.length - 1);
+      apply(h[h.length - 1], h[h.length - 1].length, { recall: true });
+    } else if (histIdx > 0) {
+      setHistIdx(histIdx - 1);
+      apply(h[histIdx - 1], h[histIdx - 1].length, { recall: true });
+    }
+  }, [apply, draft, histIdx]);
+
+  const histNext = useCallback(() => {
+    const h = hist.current;
+    if (histIdx === null) return;
+    if (histIdx < h.length - 1) {
+      setHistIdx(histIdx + 1);
+      apply(h[histIdx + 1], h[histIdx + 1].length, { recall: true });
+    } else {
+      // Walked past the newest entry: back to the draft that was parked.
+      setHistIdx(null);
+      apply(stash.current, stash.current.length);
+    }
+  }, [apply, histIdx]);
+
   const say = useCallback((text: string) => {
     setTurns((t) => [...t, { role: "bot" as const, text, local: true as const }].slice(-MAX_TURNS));
   }, []);
@@ -174,8 +370,9 @@ export function useChat(args: {
     (override?: string) => {
     const text = (override ?? draft).trim();
     if (!text || busy) return;
-    setDraft("");
-    setDismissed(false);
+    noteHistory(text);
+    // Clears the line; also resets the menu and ends any history walk.
+    apply("", 0);
     setTurns((t) => [...t, { role: "you" as const, text }].slice(-MAX_TURNS));
 
     const local = args.onLocal?.(text);
@@ -193,7 +390,24 @@ export function useChat(args: {
 
     setBusy(true);
     setStartedAt(Date.now());
-    setTurns((t) => [...t, { role: "bot" as const, text: "" }].slice(-MAX_TURNS));
+    // The placeholder is tagged rather than located by position. Streaming
+    // used to overwrite "the last turn", which is only the placeholder until
+    // something else speaks: a say() during the stream — the dropped-path
+    // and pasted-contents notices both can — became the reply's canvas, so
+    // the notice vanished and the half-streamed answer was left frozen above
+    // it as a duplicate.
+    const tag = Symbol("streaming");
+    setTurns((t) => [...t, { role: "bot" as const, text: "", tag }].slice(-MAX_TURNS));
+    /** Rewrite the tagged turn wherever it now sits; a no-op once it has
+     *  aged out of the transcript. */
+    const writeStream = (turn: Turn) =>
+      setTurns((t) => {
+        const i = t.findIndex((x) => x.tag === tag);
+        if (i === -1) return t;
+        const next = t.slice();
+        next[i] = turn;
+        return next;
+      });
     const ac = new AbortController();
     abort.current = ac;
     const msgs: LlmMessage[] = [
@@ -210,35 +424,14 @@ export function useChat(args: {
       try {
         for await (const piece of stream(msgs, { signal: ac.signal, maxTokens: 320 })) {
           acc += piece;
-          // Replace the trailing empty bot turn as tokens arrive.
-          setTurns((t) => {
-            const next = t.slice();
-            next[next.length - 1] = { role: "bot" as const, text: acc };
-            return next;
-          });
+          writeStream({ role: "bot", text: acc, tag });
         }
         if (acc.trim() === "") {
-          setTurns((t) => {
-            const next = t.slice();
-            next[next.length - 1] = {
-              role: "bot" as const,
-              text: "(the model returned nothing)",
-              local: true as const,
-            };
-            return next;
-          });
+          writeStream({ role: "bot", text: "(the model returned nothing)", local: true, tag });
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        setTurns((t) => {
-          const next = t.slice();
-          next[next.length - 1] = {
-            role: "bot" as const,
-            text: `error: ${msg}`,
-            local: true as const,
-          };
-          return next;
-        });
+        writeStream({ role: "bot", text: `error: ${msg}`, local: true, tag });
       } finally {
         setBusy(false);
         setStartedAt(null);
@@ -246,7 +439,7 @@ export function useChat(args: {
       }
     })();
   },
-    [draft, busy, args, say],
+    [draft, busy, args, say, apply, noteHistory],
   );
 
   // ── menu derivation ──────────────────────────────────────────────────────
@@ -254,13 +447,6 @@ export function useChat(args: {
   // Clamp on read rather than syncing an effect: the filter narrows as you
   // type, and an index left pointing past the end would highlight nothing.
   const clamped = menu ? Math.min(menuIndex, menu.length - 1) : 0;
-
-  const setDraftAndArm = useCallback((next: string) => {
-    setDraft(next);
-    setMenuIndex(0);
-    // Re-arm once the line is no longer the command Esc dismissed.
-    if (!next.startsWith("/")) setDismissed(false);
-  }, []);
 
   const menuMove = useCallback(
     (delta: number) => {
@@ -294,13 +480,7 @@ export function useChat(args: {
   const top = stack.length > 0 ? stack[stack.length - 1] : null;
   // Typing while a list is open narrows it — six samples is fine to arrow
   // through, but the same widget serves the analyses and anything later.
-  const shownChoices = top
-    ? top.items.filter(
-        (it) =>
-          choiceFilter === "" ||
-          `${it.label} ${it.hint ?? ""}`.toLowerCase().includes(choiceFilter.toLowerCase()),
-      )
-    : [];
+  const shownChoices = top ? narrow(top.items, choiceFilter) : [];
   const choiceAt = Math.min(choiceIndex, Math.max(0, shownChoices.length - 1));
 
   const openChoices = useCallback((list: ChoiceList) => {
@@ -345,10 +525,52 @@ export function useChat(args: {
     setChoiceIndex(0);
   }, [choiceFilter]);
 
+  /** Esc semantics are wrong for a drop: choiceBack clears a filter and stops
+   *  there, leaving the picker modal — so ⏎ would accept a highlighted item
+   *  instead of loading the file that was just dropped. */
+  const closeChoices = useCallback(() => {
+    setStack([]);
+    setChoiceIndex(0);
+    setChoiceFilter("");
+  }, []);
+
   const choiceType = useCallback((ch: string) => {
     setChoiceFilter((f) => f + ch);
     setChoiceIndex(0);
   }, []);
+
+  /**
+   * Filter and accept in one go — for a chunk where typing and its own Enter
+   * arrived together (the event loop was blocked between the keystrokes).
+   *
+   * It cannot be `choiceType` then `choiceAccept`: accept closes over the
+   * list as it was BEFORE the filter, so it would pick the wrong row. The
+   * filtering happens here, against the text we already hold.
+   */
+  const choiceTypeAccept = useCallback(
+    (text: string) => {
+      if (!top) return;
+      const filter = choiceFilter + text;
+      const matches = narrow(top.items, filter);
+      const item = matches[0];
+      if (!item) {
+        // Nothing matches: leave the filter visible so the empty state
+        // explains itself, exactly as typing it by hand would.
+        setChoiceFilter(filter);
+        setChoiceIndex(0);
+        return;
+      }
+      const next = top.onPick(item);
+      if (next && typeof next === "object" && Array.isArray(next.items)) {
+        setStack((st) => [...st, next]);
+      } else {
+        setStack([]);
+      }
+      setChoiceIndex(0);
+      setChoiceFilter("");
+    },
+    [top, choiceFilter],
+  );
 
   const choiceBackspace = useCallback(() => {
     setChoiceFilter((f) => f.slice(0, -1));
@@ -358,10 +580,27 @@ export function useChat(args: {
   return {
     turns,
     draft,
+    cursor: cur,
     busy,
     startedAt,
-    setDraft: setDraftAndArm,
+    setDraft,
     submit,
+    insert,
+    insertToken,
+    backspace,
+    del,
+    moveCursor,
+    cursorHome,
+    cursorEnd,
+    wordLeft,
+    wordRight,
+    killToStart,
+    killToEnd,
+    killWord,
+    histPrev,
+    histNext,
+    histActive: histIdx !== null,
+    noteHistory,
     say,
     menu,
     menuIndex: clamped,
@@ -381,7 +620,9 @@ export function useChat(args: {
     choiceMove,
     choiceAccept,
     choiceBack,
+    closeChoices,
     choiceType,
+    choiceTypeAccept,
     choiceBackspace,
   };
 }
@@ -466,6 +707,62 @@ export function ChatView({
       <Composer chat={chat} width={width} accent={accent} focused={focused} />
     </Box>
   );
+}
+
+/**
+ * Columns the composer's TEXT gets, given the pane width.
+ *
+ * The box takes 2 for its border and 2 for paddingX — and the `"› "` prompt
+ * is drawn INSIDE it, which the first version of this forgot. Four columns
+ * of budget against six columns of chrome is how a long line wrapped the
+ * bordered box onto a second row, shunting every pane's content up a line
+ * for the rest of the session.
+ */
+/** The picker's filter, in one place so typing and typing-then-accepting
+ *  cannot disagree about what is on screen. */
+function narrow(items: Choice[], filter: string): Choice[] {
+  if (filter === "") return items;
+  const q = filter.toLowerCase();
+  return items.filter((it) => `${it.label} ${it.hint ?? ""}`.toLowerCase().includes(q));
+}
+
+export function composerRoom(width: number): number {
+  return Math.max(8, width - 6);
+}
+
+/**
+ * The slice of the draft the composer shows, and where the caret sits in it.
+ *
+ * Every caret position 0..len is addressable — the caret is a cell of its
+ * own, over a character or a bar past the end — so the window is computed in
+ * `len + 1` cells, not `len`. The caret is parked ~3 columns from the right
+ * edge rather than pinned to it, which is what keeps text VISIBLE after the
+ * caret when ← walks back into a long line; pinning made the trailing slice
+ * empty by construction, so the rest of the line simply vanished.
+ */
+export function composerWindow(
+  draft: string,
+  cursor: number,
+  room: number,
+): { lead: string; before: string; at: string | null; after: string; tail: string } {
+  const len = draft.length;
+  const cells = len + 1;
+  const start = cells > room ? Math.min(Math.max(0, cursor - room + 3), cells - room) : 0;
+  const end = start + room;
+  // An ellipsis costs a column, so it replaces a cell rather than adding one.
+  const leadEl = start > 0;
+  const tailEl = end < cells;
+  const s = leadEl ? start + 1 : start;
+  const e = tailEl ? end - 1 : end;
+  return {
+    lead: leadEl ? "…" : "",
+    before: draft.slice(s, cursor),
+    // The caret is drawn ON the character it sits over (inverse video); past
+    // the end of the line it is a bar.
+    at: cursor < len ? draft[cursor] : null,
+    after: draft.slice(cursor + 1, e),
+    tail: tailEl ? "…" : "",
+  };
 }
 
 /** All of them, when they fit — the list is short enough that scrolling a
@@ -590,10 +887,8 @@ function Composer({
   accent: string;
   focused: boolean;
 }) {
-  // The frame eats two columns; keep the tail of a long line visible rather
-  // than the head, since the cursor is what you are looking at.
-  const room = Math.max(8, width - 4);
-  const shown = chat.draft.length > room ? `…${chat.draft.slice(-(room - 1))}` : chat.draft;
+  const { draft, cursor } = chat;
+  const { lead, before, at, after, tail } = composerWindow(draft, cursor, composerRoom(width));
   return (
     <Box
       width={width}
@@ -603,12 +898,34 @@ function Composer({
     >
       <Text color={focused ? accent : theme.mute}>{"› "}</Text>
       {chat.busy ? (
-        <Working label="thinking" color={accent} since={chat.startedAt} />
+        // The draft rides alongside the spinner: a line typed — or a path
+        // dropped — while a reply streams must stay visible, or the
+        // keystrokes read as having gone nowhere.
+        <>
+          <Working label="thinking" color={accent} since={chat.startedAt} />
+          {draft !== "" && (
+            <Text color={theme.mute}>
+              {" · "}
+              {cut(draft, Math.max(6, composerRoom(width) - 12))}
+            </Text>
+          )}
+        </>
       ) : (
         <>
-          <Text color={theme.fg}>{shown}</Text>
-          {focused && <Text color={accent}>▌</Text>}
-          {!focused && shown === "" && <Text color={theme.mute}>…</Text>}
+          <Text color={theme.fg}>{lead + before}</Text>
+          {focused ? (
+            at !== null ? (
+              <Text color={theme.fg} inverse>
+                {at}
+              </Text>
+            ) : (
+              <Text color={accent}>▌</Text>
+            )
+          ) : (
+            at !== null && <Text color={theme.fg}>{at}</Text>
+          )}
+          <Text color={theme.fg}>{after + tail}</Text>
+          {!focused && draft === "" && <Text color={theme.mute}>…</Text>}
         </>
       )}
     </Box>

@@ -4,9 +4,9 @@
 // panes fill in as each stage lands. Chat does not trigger work — it changes
 // what the agent already decided.
 
-import { relative } from "node:path";
+import { basename, relative } from "node:path";
 import { SAMPLES, SAMPLE_BY_KEY, type ColumnMeta, type SampleKey, type SampleSpec } from "@scelo/core";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, usePaste } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MODELS, resolveChoice } from "./agent/analyses";
 import { activeLabel, llmAvailable } from "./agent/llm";
@@ -18,22 +18,84 @@ import {
   type StageId,
   runPipeline,
 } from "./agent/pipeline";
-import { type ExportOutcome, type ExportTarget, exportArtifacts, parseTarget } from "./export";
+import {
+  type ExportOutcome,
+  type ExportTarget,
+  exportArtifacts,
+  parseTarget,
+  parseTargets,
+} from "./export";
 import { detectHost, hostLabel, performHandoff, performOpen, planFor } from "./export/handoff";
 import { type LiveMirror, type LiveRun, createLiveMirror } from "./export/live";
 import { slugify } from "./export/sce";
 import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
 import { COMMAND_NAMES, helpText } from "./ui/commands";
-import { extractDataPath } from "./core/ingest";
+import { type DataFileListing, fmtBytes, fmtWhen, listDataFiles } from "./core/files";
+import {
+  dropInsertText,
+  extractDataPath,
+  looksLikeFileContents,
+  normaliseDroppedPath,
+} from "./core/ingest";
+import { flattenPaste } from "./ui/paste";
 import { Welcome } from "./ui/Mascot";
-import { isMouseReport, stripMouseNoise, swallowingMouseBytes, useMouse } from "./ui/mouse";
+import {
+  isMouseFragment,
+  isMouseReport,
+  mouseActive,
+  setMouseActive,
+  stripMouseNoise,
+  swallowingMouseBytes,
+  useMouse,
+  usePasteDeadlockHatch,
+} from "./ui/mouse";
 import { paneWidths, useTerminalSize } from "./ui/size";
 import { Spinner, Working } from "./ui/spinner";
 import { MIN_HEIGHT, MIN_WIDTH, theme } from "./ui/theme";
-import { BarPlot, Head, Pane, Prose, Table } from "./ui/widgets";
+import { fanIn, fanOut } from "./ui/diagram";
+import { CHART_LIST_TOP, ChartScreen, chartListWidth } from "./ui/ChartScreen";
+import { type ChartCard, buildChart, chartMenu } from "./ui/gallery";
+import { BarPlot, Diagram, Head, Pane, Prose, Table } from "./ui/widgets";
 
 type Focus = "soft" | "tools" | "hard";
 const ORDER: Focus[] = ["soft", "tools", "hard"];
+
+/** Longest paste the one-line composer will take. Past this the paste is
+ *  certainly not a path, and inserting it would wedge the render. */
+const MAX_PASTE = 20_000;
+
+/** Rows the chat block owns at the bottom of every pane: its top margin, the
+ *  rule, the transcript's minimum height, and the composer's frame. What the
+ *  diagrams must not eat into. */
+const CHAT_ROWS = 1 + 1 + 6 + 3;
+/** A pane's own frame: two border rows and the title. */
+const PANE_CHROME = 3;
+/** Result rows the HARD table shows before it is expanded. */
+const TABLE_ROWS = 5;
+
+/**
+ * Terminal row (1-based) of the HARD table's "… N more" line — the one line
+ * in the panes that is a button.
+ *
+ * Counted rather than measured, because Ink reports no absolute positions:
+ * the header, the banner if there is one, the pane's top border and title,
+ * the "table" head with its blank, the headline, the blank above the table,
+ * its column header, then the body. The same accounting the diagrams already
+ * do against `paneH`, and wrong the same way if the pane's layout changes —
+ * hence its own test, and hence being the ONLY row bound to an action
+ * besides the header.
+ */
+export function tableFooterRow(shown: number, banner: boolean): number {
+  const paneTop = 2 + (banner ? 1 : 0);
+  return paneTop + 1 + 2 + 1 + 1 + 1 + shown + 1;
+}
+
+/** Why a paste was refused. Inside RStudio the "drop the file" advice is
+ *  actively wrong — a drop there opens RStudio's own editor. */
+const contentsNotice = (host: { kind: string }) =>
+  host.kind === "rstudio"
+    ? "that looks like a file's contents, not its path — /files picks the file itself (dragging it here opens RStudio's editor instead)"
+    : "that looks like a file's contents, not its path — drop the file itself, or /files to pick it";
 
 const STAGE_LABEL: Record<StageId, string> = {
   ingest: "read file",
@@ -81,8 +143,28 @@ export function App({
   const [stages, setStages] = useState<Partial<Record<StageId, StageEvent>>>({});
   const [pipe, setPipe] = useState<PipelineResult | null>(null);
   const [running, setRunning] = useState(false);
+  /** The same fact as `running`, readable from closures that outlive the
+   *  render they were built in — see `start`. */
+  const runningRef = useRef(false);
   const [runStart, setRunStart] = useState<number | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  /** The node/edge diagrams in TOOLS and HARD. On by default — they are the
+   *  IDE's canvases — but they cost rows, and a short terminal may want them
+   *  back. */
+  const [showGraph, setShowGraph] = useState(true);
+  /** `/charts`, which takes the whole screen. Null when the panes are up. */
+  const [charts, setCharts] = useState<{ index: number } | null>(null);
+  /** Built charts, keyed by gallery entry — and tied to the pipeline result
+   *  they were computed from, so a re-run or a new file cannot leave the
+   *  gallery showing the last dataset's numbers under this one's name. */
+  const chartCache = useRef<{ of: PipelineResult | null; built: Map<string, ChartCard | null> }>({
+    of: null,
+    built: new Map(),
+  });
+  /** The HARD table, expanded past its five rows. Clicking its "… N more"
+   *  line toggles it; the plot and the flow diagram stand down while it is
+   *  open, because the rows have to come from somewhere. */
+  const [tableOpen, setTableOpen] = useState(false);
   const started = useRef(false);
 
   // Full-bleed thirds: the three widths sum to exactly `cols`, remainder
@@ -100,24 +182,56 @@ export function App({
   // the width, so every click has an unambiguous answer, and clicking the
   // header or the hint line under a pane does the thing you meant rather
   // than nothing.
-  // The one click target that is not focus: the header's export tag. Row 1
-  // is the only row whose meaning is position-independent (Ink draws the
-  // header first), which is what makes it safe to bind an action to.
-  const exportClick = useRef<(() => void) | null>(null);
+  // Three rows mean something more than focus, and all three are rows whose
+  // position can be COUNTED rather than measured — Ink reports no geometry,
+  // so a click target has to be arithmetic the render agrees with. The
+  // header's export tag is row 1 and needs no arithmetic at all; the HARD
+  // table's "… N more" line and the gallery's list are counted, each next to
+  // the render that produces them.
+  // Independent of mouse reporting: ctrl-c must survive a truncated paste
+  // however the terminal is configured.
+  usePasteDeadlockHatch();
+
+  const clickTargets = useRef<{
+    export: (() => void) | null;
+    /** Row of the HARD table's footer line, or null when it has none. */
+    tableFooter: number | null;
+    /** How many rows the gallery's list has, when the gallery is up. */
+    chartRows: number;
+  }>({ export: null, tableFooter: null, chartRows: 0 });
   useMouse(
     useCallback(
       ({ column, row }: { column: number; row: number }) => {
-        if (row <= 1 && exportClick.current) {
-          exportClick.current();
+        const t = clickTargets.current;
+        // `chartRows` is zeroed whenever the panes render, so this is the
+        // same "is the gallery actually on screen" question the key handler
+        // asks, answered from what was last drawn.
+        if (charts && t.chartRows > 0) {
+          const i = row - CHART_LIST_TOP;
+          if (column <= chartListWidth(cols) && i >= 0 && i < t.chartRows) {
+            setCharts({ index: i });
+          }
+          return;
+        }
+        if (row <= 1 && t.export) {
+          t.export();
+          return;
+        }
+        // The table's own footer: "… 3 more" is the affordance, so clicking
+        // it is the gesture. It sits in HARD, which is also what the click
+        // focuses — the row does two things because both are what you meant.
+        if (t.tableFooter !== null && row === t.tableFooter && column > paneW * 2) {
+          setTableOpen((v) => !v);
+          setFocus("hard");
           return;
         }
         const i = Math.min(ORDER.length - 1, Math.max(0, Math.floor((column - 1) / paneW)));
         setFocus(ORDER[i]);
       },
-      [paneW],
+      [paneW, charts, cols],
     ),
   );
-  exportClick.current = pipe?.result ? () => doExport(undefined, active) : null;
+  clickTargets.current.export = pipe?.result ? () => doExport(undefined, active) : null;
 
   // Detected once: the hosting terminal cannot change mid-process, and the
   // detection probes PATH, which is not free. Declared before `start`
@@ -166,12 +280,25 @@ export function App({
 
   const start = useCallback(
     async (source: PipelineSource) => {
-      if (running) return;
+      // The guard reads a REF, not the `running` state, and `start` therefore
+      // has no `running` dependency. A modal picker snapshots its onPick when
+      // it opens (the list object lives in chat state), so a `running`-derived
+      // closure there goes stale the moment a run starts or ends behind it —
+      // picking would either refuse while nothing runs, or start a second
+      // pipeline on top of a live one and wipe its half-drawn panes.
+      if (runningRef.current) return;
+      runningRef.current = true;
       setRunning(true);
       setRunStart(Date.now());
       setStages({});
       setPipe(null);
       setBanner(null);
+      // Back to the panes, and back to a shut table. A drop still reaches
+      // the app while the gallery is up (it arrives as a paste, not a key),
+      // and a gallery whose dataset has just been cleared is a screen that
+      // cannot render and a keyboard that cannot leave it.
+      setCharts(null);
+      setTableOpen(false);
       // A fresh dataset starts a fresh live story — the mirror's run list
       // must not carry sections from the previous file.
       liveRuns.current = [];
@@ -187,6 +314,7 @@ export function App({
         // data while the model is still thinking.
         (p: PipelinePartial) => liveUpdate({ ...p, reading: "" }, true),
       );
+      runningRef.current = false;
       setRunning(false);
       setRunStart(null);
       if (!r.ok) setBanner(r.error);
@@ -204,7 +332,7 @@ export function App({
         liveUpdate(r.value, false);
       }
     },
-    [running, onPath, liveUpdate],
+    [onPath, liveUpdate],
   );
 
   // Auto-run a path given on the command line — from an effect, not from
@@ -244,7 +372,9 @@ export function App({
       setTimeout(() => {
         try {
           const plan = planFor(host);
-          const outcome = exportArtifacts(pipe, { targets, ...plan });
+          // The session's runs, so the R script restates every analysis that
+          // was actually performed rather than only the one still on screen.
+          const outcome = exportArtifacts(pipe, { targets, runs: liveRuns.current, ...plan });
           lastExport.current = outcome;
           const rel = relative(process.cwd(), outcome.dir);
           const where =
@@ -287,7 +417,9 @@ export function App({
       onPick: (c) => {
         const spec = SAMPLE_BY_KEY.get(c.id as SampleKey);
         if (!spec) return;
-        if (running) {
+        // The ref, not the state: this closure is stored in the picker and
+        // outlives the render that built it.
+        if (runningRef.current) {
           chat.say("a run is already in progress — wait for it to finish");
           return;
         }
@@ -295,7 +427,36 @@ export function App({
         void start({ dataset: spec.build() });
       },
     }),
-    [start, running],
+    [start],
+  );
+
+  /** Real files near a directory, same widget. This is THE loading path
+   *  inside RStudio, where a drag never reaches the terminal — RStudio
+   *  opens drops in its own editor (with a 5 MB dialog past which it will
+   *  not even do that). */
+  const fileChoices = useCallback(
+    (chat: ChatHandle, root: string, listing: DataFileListing): ChoiceList => ({
+      // A capped list says so: presenting the newest 400 of 900 as "the data
+      // files under here" is how a file that exists reads as missing.
+      title:
+        listing.found > listing.files.length
+          ? `newest ${listing.files.length} of ${listing.found} data files under ${relative(process.cwd(), root) || "."} — type to filter`
+          : `data files under ${relative(process.cwd(), root) || "."} — type to filter`,
+      items: listing.files.map((e) => ({
+        id: e.path,
+        label: e.parts ? `${e.rel} (${e.parts} parts)` : e.rel,
+        hint: `${fmtBytes(e.bytes)} · ${fmtWhen(e.mtimeMs, Date.now())}${e.parts ? ` · loads all ${e.parts} parts` : ""}`,
+      })),
+      onPick: (c) => {
+        if (runningRef.current) {
+          chat.say("a run is already in progress — wait for it to finish");
+          return;
+        }
+        chat.say(`loading ${c.label}`);
+        void start(c.id);
+      },
+    }),
+    [start],
   );
 
   /** The analyses that apply to the loaded data, same widget. */
@@ -355,7 +516,7 @@ export function App({
           chat.openChoices(sampleChoices(chat));
           return r.matches.length > 1 ? `"${query}" matches several —` : `no sample matches "${query}" —`;
         }
-        if (running) return "a run is already in progress — wait for it to finish";
+        if (runningRef.current) return "a run is already in progress — wait for it to finish";
         void start({ dataset: r.spec.build() });
         return `loading ${r.spec.title} (${r.spec.rows}×${r.spec.cols}) — the pipeline is running on it`;
       }
@@ -367,7 +528,18 @@ export function App({
       // "show me the mean…" and "open questions…" are ordinary chat, so
       // those two require the slash.
       if (!slash && (verb === "show" || verb === "open")) return null;
-      if (!slash && (verb === "help" || verb === "list") && args.length > 0) return null;
+      if (
+        !slash &&
+        (verb === "help" ||
+          verb === "list" ||
+          verb === "charts" ||
+          verb === "files" ||
+          verb === "mouse" ||
+          verb === "graph") &&
+        args.length > 0
+      ) {
+        return null;
+      }
       if (!slash && verb === "run" && args.length === 0) return null;
       if (!known) {
         return `unknown command /${verb} — ${HELP}`;
@@ -376,10 +548,68 @@ export function App({
       switch (verb) {
         case "help":
           return HELP;
+        case "graph": {
+          const want = (args[0] ?? "").toLowerCase();
+          if (want !== "" && !["on", "off", "toggle"].includes(want)) {
+            return "usage: /graph [on|off]";
+          }
+          const next = want === "on" ? true : want === "off" ? false : !showGraph;
+          setShowGraph(next);
+          return next
+            ? "diagrams on — TOOLS shows the dataset feeding each candidate analysis, HARD shows the runs feeding the output"
+            : "diagrams off — the panes give the rows back to the tables and the chat";
+        }
+        case "mouse": {
+          const want = (args[0] ?? "").toLowerCase();
+          if (want !== "" && !["on", "off", "toggle"].includes(want)) {
+            return "usage: /mouse [on|off]";
+          }
+          const next = want === "on" ? true : want === "off" ? false : !mouseActive();
+          const reached = setMouseActive(next);
+          if (next && !reached) {
+            return "mouse reporting is disabled for this session (SCELO_TUI_MOUSE=0) — restart without it to use clicks";
+          }
+          return reached
+            ? "mouse on — click a pane to focus it. Selecting text to copy needs shift-drag while this is on; /mouse off hands selection back."
+            : "mouse off — drag to select and copy normally again. Tab still moves between panes; /mouse on restores click-to-focus.";
+        }
+        case "files": {
+          // The raw remainder, not the re-joined tokens: `/files 'a  b'`
+          // names a directory with two spaces, and args.join(" ") would go
+          // looking for "a b" and report an error naming a path the user
+          // never typed.
+          const raw = (slash ? text.slice(1) : text).trim().replace(/^\S+\s*/, "");
+          const root = raw === "" ? process.cwd() : normaliseDroppedPath(raw);
+          let listing: DataFileListing;
+          try {
+            listing = listDataFiles(root);
+          } catch (e) {
+            return `cannot read ${root}: ${e instanceof Error ? e.message : String(e)}`;
+          }
+          const shown = relative(process.cwd(), root) || ".";
+          if (listing.files.length === 0) {
+            return `no data files (csv/tsv/txt) under ${shown} — /files <folder> looks elsewhere`;
+          }
+          chat.openChoices(fileChoices(chat, root, listing));
+          return "";
+        }
         case "list": {
           if (!pipe) return "no dataset loaded yet";
           chat.openChoices(analysisChoices(chat, eligible));
           return "";
+        }
+        case "charts": {
+          if (!pipe) return "no dataset loaded yet";
+          const entries = chartMenu(pipe.metas, liveRuns.current.map((r) => r.id));
+          if (entries.length === 0) return "nothing in this data plots";
+          // `/charts 3` lands on the third one — the same "a bare number
+          // answers the menu you were just shown" habit the rest of the app
+          // has, without needing the menu first.
+          const n = Number(args[0]);
+          const index =
+            Number.isInteger(n) && n >= 1 && n <= entries.length ? n - 1 : 0;
+          setCharts({ index });
+          return `${entries.length} plot${entries.length === 1 ? "" : "s"} — esc returns to the panes`;
         }
         case "run": {
           if (!pipe) return "no dataset loaded yet";
@@ -416,13 +646,14 @@ export function App({
           return columnCard(meta);
         }
         case "export": {
-          const targets: ExportTarget[] = [];
-          for (const w of args) {
-            const t = parseTarget(w);
-            if (!t) return `don't know the format "${w}" — try excel, python, notebook, r, sce or csv`;
-            targets.push(t);
+          // "export the whole analysis in r code" names one format and five
+          // filler words; reading every word as a format is how that turns
+          // into `don't know the format "the"`.
+          const parsed = parseTargets(args);
+          if (!parsed.ok) {
+            return `don't know the format "${parsed.word}" — try excel, python, notebook, r, sce or csv`;
           }
-          doExport(targets.length > 0 ? targets : undefined, chat);
+          doExport(parsed.targets.length > 0 ? parsed.targets : undefined, chat);
           // doExport speaks for itself (start + finish lines).
           return "";
         }
@@ -499,7 +730,17 @@ export function App({
       }
       return null;
     },
-    [pipe, doExport, start, running, sampleChoices, analysisChoices, liveUpdate],
+    [
+      pipe,
+      doExport,
+      start,
+      running,
+      showGraph,
+      sampleChoices,
+      analysisChoices,
+      fileChoices,
+      liveUpdate,
+    ],
   );
 
   // ── context each bot sees ───────────────────────────────────────────────
@@ -554,12 +795,115 @@ export function App({
   const chats = { soft: softChat, tools: toolsChat, hard: hardChat };
   const active = chats[focus];
 
+  // ── drag-drop is a paste ────────────────────────────────────────────────
+  // Dragging a file onto the window makes the emulator PASTE its path, and
+  // usePaste (bracketed paste mode) hands that over as one event that never
+  // reaches useInput. Three shapes arrive here: a drop, which deposits ONLY
+  // the clean path in the composer — not the file:// URI or quote soup the
+  // emulator dressed it in; the file's CONTENTS (opened, copied, pasted
+  // whole), which get pointed back at the path instead of flooding a
+  // one-line composer; and ordinary text, flattened to the one line the
+  // composer is.
+  const acceptPaste = useCallback(
+    (raw: string, chat: ChatHandle) => {
+      // Size first: dropInsertText scans the whole string several times, so
+      // probing a 5 MB paste for a path froze all three panes for a third of
+      // a second before discarding it. Nothing this long is a path.
+      if (raw.length > MAX_PASTE) {
+        chat.say(contentsNotice(host));
+        return;
+      }
+      const path = dropInsertText(raw);
+      if (path) {
+        // A modal picker owns the keys, but a drop outranks it: dropping a
+        // file means "load this". It must CLOSE, not step back — choiceBack
+        // is Esc, and on a filtered list Esc only clears the filter, leaving
+        // the picker up so ⏎ would accept a highlighted item and load a
+        // different dataset than the one just dropped.
+        chat.closeChoices();
+        chat.insertToken(path);
+        if (chat.busy) {
+          // The composer shows the spinner while a reply streams, so an
+          // inserted path would land invisibly and read as a failed drop.
+          chat.say(`path ready — ⏎ loads ${basename(path.replace(/^['"]|['"]$/g, ""))}`);
+        }
+        return;
+      }
+      if (looksLikeFileContents(raw)) {
+        chat.say(contentsNotice(host));
+        return;
+      }
+      const flat = flattenPaste(raw);
+      if (flat === "") return;
+      if (chat.choices) chat.choiceType(flat);
+      else chat.insert(flat);
+    },
+    [host],
+  );
+
+  /** What ⏎ does to a line, given the text explicitly rather than from the
+   *  handle — a coalesced burst submits text that has not reached state yet. */
+  const submitLine = useCallback(
+    (line: string, chat: ChatHandle) => {
+      const text = line.trim();
+      // A path typed or dragged into any pane starts a run — that is the
+      // "drop a file in" gesture, and it should work from wherever you are.
+      // extractDataPath ignores everything AROUND the path (drag gestures
+      // bracket it with mouse-report bytes) while leaving prose that merely
+      // mentions a file to the chat.
+      const dropped = extractDataPath(text);
+      if (dropped) {
+        if (runningRef.current) {
+          // Every other load path narrates this; the drop used to be the one
+          // that cleared the composer and did nothing at all.
+          chat.say("a run is already in progress — wait for it to finish");
+          return;
+        }
+        // A drop is a prompt too: ↑ must be able to offer the load line for
+        // a re-run, even though it never goes through submit().
+        chat.noteHistory(text);
+        chat.setDraft("");
+        void start(dropped);
+        return;
+      }
+      chat.submit(text);
+    },
+    [start],
+  );
+
+  usePaste((text) => {
+    // NOT stripMouseNoise: between the paste markers the bytes are clipboard
+    // content verbatim — a terminal cannot inject a report there — so the
+    // `digits;digits;digitsM` shape only ever matches the user's own text,
+    // and stripping it would silently eat "10;20;30Max" mid-sentence.
+    acceptPaste(text, active);
+  });
+
   useInput((input, key) => {
     // A click arrives on stdin as an escape sequence, and Ink hands it to us
     // as if it were typing. Both guards are load-bearing: the flag catches it
     // however Ink chose to split the bytes up, the pattern catches a sequence
     // that reached us without the flag being set.
-    if (swallowingMouseBytes() || isMouseReport(input)) return;
+    //
+    // The flag is per stdin CHUNK, not per event, and Ink drains a whole
+    // buffer synchronously — so a drag whose path shares a chunk with the
+    // click reports bracketing it would lose the path along with them.
+    // Exactly one thing is worth rescuing from a flagged chunk: a path. Any
+    // other residue (a split report's "4M" tail) stays swallowed, which is
+    // what keeps report fragments from becoming typing.
+    if (isMouseReport(input)) return;
+    // A report Ink held as an incomplete escape and flushed 20ms later, long
+    // after the swallow flag cleared. Only while reporting is on, so a
+    // literal "[<12" typed into a mouse-free session still gets through.
+    if (mouseActive() && isMouseFragment(input)) return;
+    if (swallowingMouseBytes()) {
+      const rescued = dropInsertText(stripMouseNoise(input));
+      if (rescued) {
+        active.closeChoices();
+        active.insertToken(rescued);
+      }
+      return;
+    }
     if (key.ctrl && input === "c") {
       exit();
       return;
@@ -570,6 +914,23 @@ export function App({
     }
     if (key.ctrl && input === "e") {
       doExport(undefined, active);
+      return;
+    }
+    // The gallery is the whole screen, so it is the whole keyboard: there is
+    // no composer under it to type into, and a key it does not claim must do
+    // nothing rather than land invisibly in a pane nobody can see. Guarded on
+    // the dataset as well as the flag — the render needs both, so anything
+    // that clears one behind this branch's back must hand the keys back.
+    if (charts && pipe) {
+      const n = clickTargets.current.chartRows;
+      const move = (d: number) =>
+        setCharts((c) => (c ? { index: (c.index + d + n) % Math.max(1, n) } : c));
+      if (key.escape || key.return || input === "q") setCharts(null);
+      else if (key.upArrow || key.leftArrow) move(-1);
+      else if (key.downArrow || key.rightArrow) move(1);
+      else if (/^[1-9]$/.test(input) && Number(input) <= n) {
+        setCharts({ index: Number(input) - 1 });
+      }
       return;
     }
     // A pushed sub-list is modal: it owns every key except the ctrl-
@@ -598,7 +959,23 @@ export function App({
         return;
       }
       if (!key.tab && input && !key.ctrl && !key.meta) {
-        active.choiceType(input);
+        const clean = stripMouseNoise(input);
+        if (!clean) return;
+        if ([...clean].length === 1) {
+          active.choiceType(clean);
+          return;
+        }
+        // The same coalesced typing+Enter the composer handles — and it
+        // matters more here: flattening "2\r" to "2 " types a filter that
+        // matches nothing and swallows the Enter, so the pick never happens
+        // and the list collapses to its empty state.
+        if (/^[^\x00-\x1f\x7f]*\r$/.test(clean)) {
+          active.choiceTypeAccept(clean.slice(0, -1));
+          return;
+        }
+        // A drop while a picker is open must fold it and load, not become a
+        // filter nobody can match ('nothing matches "/tmp/claims.csv"').
+        acceptPaste(clean, active);
         return;
       }
     }
@@ -607,11 +984,15 @@ export function App({
     // command rather than throwing you into the next pane mid-word.
     if (active.menu) {
       if (key.upArrow) {
-        active.menuMove(-1);
+        // Mid-history-walk the arrows stay with history: recalling a
+        // /command re-opens the menu, and the walk must not strand there.
+        if (active.histActive) active.histPrev();
+        else active.menuMove(-1);
         return;
       }
       if (key.downArrow) {
-        active.menuMove(1);
+        if (active.histActive) active.histNext();
+        else active.menuMove(1);
         return;
       }
       if (key.escape) {
@@ -627,24 +1008,85 @@ export function App({
       setFocus((f) => ORDER[(ORDER.indexOf(f) + 1) % ORDER.length]);
       return;
     }
-    if (key.return) {
-      const text = active.draft.trim();
-      // A path typed or dragged into any pane starts a run — that is the
-      // "drop a file in" gesture, and it should work from wherever you are.
-      // extractDataPath ignores everything AROUND the path (drag gestures
-      // bracket it with mouse-report bytes) while leaving prose that merely
-      // mentions a file to the chat.
-      const dropped = extractDataPath(text);
-      if (dropped) {
-        active.setDraft("");
-        void start(dropped);
-        return;
-      }
-      active.submit();
+    // ── the composer is a readline ──────────────────────────────────────────
+    // The keys every terminal input is expected to have: ↑↓ walk the prompt
+    // history, ←→/home/end move the caret, and the ctrl chords do what they
+    // do in every shell. Only reached when no menu or picker owns the arrows.
+    if (key.upArrow) {
+      active.histPrev();
       return;
     }
-    if (key.backspace || key.delete) {
-      active.setDraft(active.draft.slice(0, -1));
+    if (key.downArrow) {
+      active.histNext();
+      return;
+    }
+    if (key.leftArrow) {
+      // ctrl-← / alt-← hop a word; plain ← moves one column.
+      if (key.ctrl || key.meta) active.wordLeft();
+      else active.moveCursor(-1);
+      return;
+    }
+    if (key.rightArrow) {
+      if (key.ctrl || key.meta) active.wordRight();
+      else active.moveCursor(1);
+      return;
+    }
+    if (key.home) {
+      active.cursorHome();
+      return;
+    }
+    if (key.end) {
+      active.cursorEnd();
+      return;
+    }
+    // The readline chords. (ctrl-e would be readline's End, but it already
+    // means export here; the End key and ctrl-a still cover both edges.)
+    if (key.ctrl && input === "a") {
+      active.cursorHome();
+      return;
+    }
+    if (key.ctrl && input === "u") {
+      active.killToStart();
+      return;
+    }
+    if (key.ctrl && input === "k") {
+      active.killToEnd();
+      return;
+    }
+    if (key.ctrl && input === "w") {
+      active.killWord();
+      return;
+    }
+    if (key.ctrl && input === "d") {
+      active.del();
+      return;
+    }
+    if (key.meta && input === "b") {
+      active.wordLeft();
+      return;
+    }
+    if (key.meta && input === "f") {
+      active.wordRight();
+      return;
+    }
+    if (key.escape) {
+      // Esc on a draft clears it. The menus take esc before this line, so
+      // this only fires when there is nothing else for esc to close.
+      if (active.draft !== "") active.setDraft("");
+      return;
+    }
+    if (key.return) {
+      submitLine(active.draft, active);
+      return;
+    }
+    if (key.backspace) {
+      active.backspace();
+      return;
+    }
+    // Ink 7 tells the two apart: 0x7f is backspace, `[3~` is the Delete
+    // key — which deletes AT the caret, the way it does everywhere else.
+    if (key.delete) {
+      active.del();
       return;
     }
     if (input && !key.ctrl && !key.meta && !key.escape) {
@@ -652,7 +1094,33 @@ export function App({
       // through with their ESC[< prefix already consumed must never become
       // typing.
       const clean = stripMouseNoise(input);
-      if (clean) active.setDraft(active.draft + clean);
+      if (!clean) return;
+      // One printable character is typing; anything longer arrived as a
+      // chunk, and a chunk is either a paste (in a terminal without
+      // bracketed paste, where a drop lands here rather than in usePaste) or
+      // keystrokes the event loop coalesced while it was blocked.
+      if ([...clean].length === 1) {
+        active.insert(clean);
+        return;
+      }
+      // Typing that coalesced with its own Enter: the ONLY control byte is
+      // one trailing CR. Flattening that (the paste rule) would turn the
+      // Enter into a space and silently swallow the message — so it submits
+      // instead, with the text the caret would have produced.
+      if (/^[^\x00-\x1f\x7f]*\r$/.test(clean)) {
+        const body = clean.slice(0, -1);
+        const merged =
+          active.draft.slice(0, active.cursor) + body + active.draft.slice(active.cursor);
+        // Insert FIRST. submit() refuses while the pane is streaming, and a
+        // line that only ever existed as a local string would vanish with no
+        // trace — where the same keystrokes delivered one at a time sit
+        // safely in the draft. On a successful submit this is redundant:
+        // submit clears the line anyway.
+        if (body !== "") active.insert(body);
+        submitLine(merged, active);
+        return;
+      }
+      acceptPaste(clean, active);
     }
   });
 
@@ -668,6 +1136,152 @@ export function App({
   }
 
   const p = pipe;
+
+  // ── /charts, on its own screen ──────────────────────────────────────────
+  // Listing is cheap (an `applies` check per analysis); BUILDING one runs the
+  // analysis, so only the selected chart is built, and the cache means
+  // arrowing back to one you have already seen is free. The first build of a
+  // heavy analysis blocks the render — the same trade `/run` already makes,
+  // for the same reason: these are sub-second pure functions and a worker
+  // would cost more than it saves.
+  if (charts && p) {
+    if (chartCache.current.of !== p) chartCache.current = { of: p, built: new Map() };
+    const cache = chartCache.current.built;
+    const entries = chartMenu(p.metas, liveRuns.current.map((r) => r.id));
+    clickTargets.current.chartRows = entries.length;
+    const index = Math.min(charts.index, Math.max(0, entries.length - 1));
+    const entry = entries[index];
+    let card: ChartCard | null = null;
+    if (entry) {
+      if (!cache.has(entry.key)) cache.set(entry.key, buildChart(entry, p));
+      card = cache.get(entry.key) ?? null;
+    }
+    return (
+      <ChartScreen
+        entries={entries}
+        index={index}
+        card={card}
+        datasetName={p.dataset.name}
+        cols={cols}
+        rows={rows}
+      />
+    );
+  }
+  clickTargets.current.chartRows = 0;
+
+  // ── the two canvases, as a terminal draws them ──────────────────────────
+  // The IDE puts a node/edge canvas in each of these panes: TOOLS fans the
+  // dataset OUT to its candidate models, HARD fans the results back IN to a
+  // board pack. Same two pictures here, flattened onto a vertical spine and
+  // budgeted in ROWS — the panes already own a stage list, a rationale, a
+  // table and a chat, so the diagram takes what is left and truncates itself
+  // rather than pushing the composer off the bottom of the screen.
+  const paneH = Math.max(12, rows - (banner ? 3 : 2));
+  // Ink CLIPS a pane that overflows its fixed-height row, and it clips
+  // silently — the symptom is a box missing its top border, not an error. So
+  // the budget is counted honestly against everything else the pane draws,
+  // with a row left spare.
+  const fanOutLeaves = (budget: number) => Math.floor((budget - 5) / 3);
+  const fanInLeaves = (budget: number) => Math.floor((budget - 6) / 3);
+
+  const eligible = p ? MODELS.filter((m) => m.applies(p.metas)) : [];
+  const toolsDiagram = (() => {
+    if (!showGraph || !p?.chosen || eligible.length === 0) return [];
+    const spent =
+      PANE_CHROME +
+      2 + // "pipeline" head
+      5 + // one line per stage
+      2 + // "analyses" head
+      4 + // the rationale, at its cap
+      1 + // the /run hint
+      CHAT_ROWS;
+    const max = fanOutLeaves(paneH - spent - 1);
+    if (max < 1) return [];
+    // The chosen analysis leads; the rest are the alternatives `/run` offers.
+    const ordered = [
+      ...eligible.filter((m) => m.id === p.chosen?.id),
+      ...eligible.filter((m) => m.id !== p.chosen?.id),
+    ];
+    return fanOut(
+      {
+        label: p.dataset.name,
+        detail: `${p.dataset.rows.length.toLocaleString()} × ${p.dataset.columns.length}${
+          p.clean && p.clean.passes.length > 0
+            ? ` · ${p.clean.passes.reduce((n, x) => n + x.opLabels.length, 0)} clean steps`
+            : ""
+        }`,
+        status: "live",
+      },
+      ordered.map((m) => ({
+        label: m.label,
+        status: m.id === p.chosen?.id ? ("live" as const) : ("idle" as const),
+      })),
+      { width: inner, accent: theme.tools, maxLeaves: max },
+    );
+  })();
+
+  // ── the HARD table, open or shut ────────────────────────────────────────
+  // Expanded, the table takes every row the plot and the flow diagram were
+  // using — which is the deal the click makes, and why both stand down while
+  // it is open rather than being squeezed into two rows each.
+  const tableRoom =
+    paneH -
+    PANE_CHROME -
+    2 - // "table" head
+    1 - // the headline
+    1 - // the blank above the table
+    1 - // the table's own header row
+    1 - // the footer line
+    CHAT_ROWS;
+  const tableRows = tableOpen ? Math.max(TABLE_ROWS, tableRoom) : TABLE_ROWS;
+  const tableBody = p?.result ? Math.min(tableRows, p.result.rows.length) : 0;
+  // Only a truncated table has a footer to click; an expanded one always
+  // does, because collapsing it again has to be reachable the same way.
+  clickTargets.current.tableFooter =
+    p?.result && (tableOpen || p.result.rows.length > tableBody)
+      ? tableFooterRow(tableBody, banner !== null)
+      : null;
+
+  const hardDiagram = (() => {
+    if (!showGraph || !p?.result || tableOpen) return [];
+    // The numbers come first: the table, then the plot. The diagram gets
+    // what is left of the pane, or it does not appear.
+    const body = p.result.rows.length;
+    const spent =
+      PANE_CHROME +
+      2 + // "table" head
+      1 + // the headline
+      1 + // the blank above the table
+      1 + // the table's own header row
+      Math.min(TABLE_ROWS, body) +
+      (body > TABLE_ROWS ? 1 : 0) +
+      (p.result.series ? 3 + Math.min(5, p.result.series.values.length) : 0) +
+      2 + // "flow" head
+      CHAT_ROWS;
+    const max = fanInLeaves(paneH - spent - 1);
+    if (max < 1) return [];
+    // Every analysis the session actually ran — the provenance of the numbers
+    // above. liveRuns is appended to by /run and by the pipeline's own pick.
+    const runs =
+      liveRuns.current.length > 0
+        ? liveRuns.current
+        : p.chosen
+          ? [{ id: p.chosen.id, label: p.chosen.label, rationale: p.rationale }]
+          : [];
+    if (runs.length === 0) return [];
+    return fanIn(
+      runs.map((r) => ({
+        label: r.label,
+        status: r.id === p.chosen?.id ? ("live" as const) : ("live" as const),
+      })),
+      {
+        label: p.result.headline,
+        detail: `${runs.length} run${runs.length === 1 ? "" : "s"} · ctrl-e exports`,
+        status: "live",
+      },
+      { width: inner, accent: theme.hard, maxLeaves: max },
+    );
+  })();
 
   return (
     <Box flexDirection="column">
@@ -740,13 +1354,15 @@ export function App({
                   drop never reaches this terminal, so don't suggest it. */}
               {host.kind === "rstudio" ? (
                 <>
-                  <Text color={theme.mute}>paste a CSV's path below and press ⏎</Text>
+                  <Text color={theme.mute}>type /files to pick a CSV from this folder,</Text>
+                  <Text color={theme.mute}>or paste a path below and press ⏎</Text>
                   <Text color={theme.mute}>(don't drag — RStudio opens drops in its editor),</Text>
                 </>
               ) : (
                 <>
-                  <Text color={theme.mute}>drag a CSV onto this window,</Text>
-                  <Text color={theme.mute}>paste its path below and press ⏎,</Text>
+                  <Text color={theme.mute}>drag a CSV onto this window</Text>
+                  <Text color={theme.mute}>(its path lands below), press ⏎,</Text>
+                  <Text color={theme.mute}>or /files to pick one from this folder,</Text>
                 </>
               )}
               <Text color={theme.mute}>or type /example for the IDE's sample data</Text>
@@ -787,8 +1403,15 @@ export function App({
           })}
           {p?.chosen && (
             <>
-              <Head>chosen</Head>
-              <Text color={theme.tools}>{p.chosen.label}</Text>
+              {/* The diagram shows the chosen analysis AND the alternatives,
+                  so it earns the plural. Without the room for it, the pane
+                  falls back to naming the one that won. */}
+              <Head>{toolsDiagram.length > 0 ? "analyses" : "chosen"}</Head>
+              {toolsDiagram.length > 0 ? (
+                <Diagram lines={toolsDiagram} />
+              ) : (
+                <Text color={theme.tools}>{p.chosen.label}</Text>
+              )}
               <Prose text={p.rationale} width={inner} maxLines={4} color={theme.mute} />
               <Text color={theme.mute}>/run to change · /list for the menu</Text>
             </>
@@ -808,27 +1431,36 @@ export function App({
               <Head>table</Head>
               <Text color={theme.hard}>{p.result.headline}</Text>
               <Box marginTop={1}>
-                <Table columns={p.result.columns} rows={p.result.rows} width={inner} maxRows={5} />
+                <Table
+                  columns={p.result.columns}
+                  rows={p.result.rows}
+                  width={inner}
+                  maxRows={tableRows}
+                  expanded={tableOpen}
+                />
               </Box>
-              {p.result.series && (
+              {p.result.series && !tableOpen && (
                 <>
                   <Head>plot</Head>
-                  <Text color={theme.mute}>{p.result.series.label}</Text>
+                  {/* The pane's plot is a sparkline's budget — five rows and
+                      forty columns. Saying where the full-size one lives
+                      costs no rows here, which a separate hint line would. */}
+                  <Text color={theme.mute} wrap="truncate">
+                    {p.result.series.label} · /charts
+                  </Text>
                   <BarPlot
                     values={p.result.series.values}
-                    // Row labels only when the series IS the rows — the
-                    // concentration analysis plots ten deciles against a
-                    // four-row table, and borrowing its labels would caption
-                    // decile 1 as "top 1%".
-                    labels={
-                      p.result.series.values.length === p.result.rows.length
-                        ? p.result.rows.map((r) => String(r[0]))
-                        : undefined
-                    }
+                    labels={p.result.series.labels}
                     width={inner}
                     color={theme.hard}
                     max={5}
                   />
+                </>
+              )}
+              {hardDiagram.length > 0 && (
+                <>
+                  <Head>flow</Head>
+                  <Diagram lines={hardDiagram} />
                 </>
               )}
             </>
@@ -843,8 +1475,8 @@ export function App({
 
       <Box>
         <Text color={theme.mute}>
-          click/tab pane · ⏎ send (or paste a path) · /help commands · ctrl-e export · ctrl-o
-          model · ctrl-c quit
+          click/tab pane · ⏎ send (or paste a path) · ↑↓ history · /help commands · ctrl-e
+          export · ctrl-o model · ctrl-c quit
         </Text>
       </Box>
     </Box>
@@ -877,10 +1509,11 @@ const NO_DATA_CONTEXT = (pane: string) =>
     "nothing is loaded yet and point at the commands below.",
     "",
     "How the user loads data:",
+    "  /files          pick a real data file from the working directory",
     "  /example        list the bundled sample datasets",
     "  /example 2      load one by number (a bare number works after the list)",
     "  or paste a CSV's path and press enter (drag-drop works in plain",
-    "  terminals; inside RStudio a drop opens ITS editor, so paste there)",
+    "  terminals; inside RStudio a drop opens ITS editor — use /files there)",
     "",
     "Be terse — 3 lines max.",
   ].join("\n");
