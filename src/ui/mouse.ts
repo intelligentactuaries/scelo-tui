@@ -126,22 +126,36 @@ export function isMouseFragment(input: string): boolean {
   return /^(?:\x1b)?\[<[\d;]*[Mm]?$/.test(input);
 }
 
-/** Opt out for terminals where mouse reporting fights something else, or for
- *  anyone who would rather keep native click-drag selection. */
-export function mouseEnabled(): boolean {
+// ── the copy/paste trade, and which side of it we default to ─────────────
+//
+// While mouse reporting is on, the terminal routes button events to US, and
+// dragging stops selecting text. Every emulator offers shift-drag as the
+// bypass (VTE, xterm, Konsole, Windows Terminal, iTerm all honour it) — but
+// that is a thing you have to KNOW, and the symptom of not knowing it is
+// "I cannot copy anything from this window", which is a terrible first hour
+// with a tool whose whole job is handing you numbers.
+//
+// So reporting is OFF unless asked for. Selecting a column and pressing
+// ctrl-shift-c is what every other program in the session does, and it keeps
+// working here. Clicks are one command away (`/mouse on`), the affordances
+// that need them say so where they appear, and tab reaches every pane
+// regardless — nothing is only reachable by mouse.
+//
+// SCELO_TUI_MOUSE=1 starts a session with clicks already on; =0 forbids them
+// outright, for a terminal where reporting fights something else.
+
+/** May reporting be turned on at all? `=0` is a hard veto — `/mouse on`
+ *  cannot override it — for terminals where the mode breaks something. */
+export function mouseAllowed(): boolean {
   return process.env.SCELO_TUI_MOUSE !== "0";
 }
 
-// ── the copy/paste trade ──────────────────────────────────────────────────
-//
-// While mouse reporting is on, the terminal routes button events to US, so
-// dragging no longer selects text: in most emulators copying needs shift-drag
-// (GNOME/VTE, xterm, Konsole, Windows Terminal, iTerm all honour shift as the
-// bypass). That is a real cost for a data tool, where copying a column name
-// or a number out of a pane is routine — so it has to be revocable AT RUNTIME
-// rather than only by restarting with SCELO_TUI_MOUSE=0. `/mouse off` turns
-// reporting off and hands click-drag selection straight back to the terminal;
-// tab still moves between panes, so nothing becomes unreachable.
+/** Should a fresh session start with clicks on? Off unless asked, so that
+ *  drag-to-select — the thing every other window does — works out of the
+ *  box. */
+export function mouseDefault(): boolean {
+  return mouseAllowed() && process.env.SCELO_TUI_MOUSE === "1";
+}
 
 /** Runtime override from `/mouse`. null means "follow the environment". */
 let userWants: boolean | null = null;
@@ -149,13 +163,13 @@ let userWants: boolean | null = null;
 let applyMode: ((on: boolean) => void) | null = null;
 
 export function mouseActive(): boolean {
-  return userWants ?? mouseEnabled();
+  return userWants ?? mouseDefault();
 }
 
 /** Turn reporting on/off now. Returns the state actually reached — a
  *  non-TTY (or SCELO_TUI_MOUSE=0) cannot be turned on. */
 export function setMouseActive(on: boolean): boolean {
-  const reachable = on && mouseEnabled();
+  const reachable = on && mouseAllowed();
   // Record what was REACHED, not what was wished for: storing an impossible
   // `true` made mouseActive() report "on" for a session where reporting can
   // never be enabled, so the next bare `/mouse` toggled it "off" and
@@ -247,7 +261,7 @@ export function useMouse(onClick: (c: Click) => void, enabled = true): void {
   handler.current = onClick;
 
   useEffect(() => {
-    if (!enabled || !mouseEnabled()) return;
+    if (!enabled || !mouseAllowed()) return;
     const stdin = process.stdin;
     if (!stdin.isTTY) return;
 

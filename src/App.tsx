@@ -651,8 +651,8 @@ export function App({
             return "mouse reporting is disabled for this session (SCELO_TUI_MOUSE=0) — restart without it to use clicks";
           }
           return reached
-            ? "mouse on — click a pane to focus it. Selecting text to copy needs shift-drag while this is on; /mouse off hands selection back."
-            : "mouse off — drag to select and copy normally again. Tab still moves between panes; /mouse on restores click-to-focus.";
+            ? "clicks on — click a pane to focus it, or the table's \"… N more\" to expand it. Selecting text now needs SHIFT held while you drag; /mouse off hands plain drag back."
+            : "clicks off — drag selects and copies exactly as it does in any other window. Tab moves between panes, /copy puts values on the clipboard, and /mouse on brings clicks back.";
         }
         case "files": {
           // The raw remainder, not the re-joined tokens: `/files 'a  b'`
@@ -995,6 +995,13 @@ export function App({
     }
     if (key.ctrl && input === "e") {
       doExport(undefined, active);
+      return;
+    }
+    // The HARD table, open or shut. A keystroke rather than only a click,
+    // because clicks are off unless asked for and a result you cannot see
+    // all of is the wrong thing to gate behind a mode.
+    if (key.ctrl && input === "t") {
+      setTableOpen((v) => !v);
       return;
     }
     // The gallery is the whole screen, so it is the whole keyboard: there is
@@ -1720,8 +1727,13 @@ export function App({
       </Box>
 
       <Box>
+        {/* The first thing on the line is whichever is true right now: with
+            clicks off, drag selects and copies the way every other window in
+            the session does, and saying so is the difference between that
+            working and someone concluding the app will not let them. */}
         <Text color={theme.mute}>
-          click/tab pane · ⏎ send (or paste a path) · ↑↓ history · /help commands · ctrl-e
+          {mouseActive() ? "click/tab pane · shift-drag copies" : "tab pane · drag to select+copy"}{" "}
+          · ⏎ send (or paste a path) · ↑↓ history · /copy values · /help commands · ctrl-e
           export · ctrl-o model · ctrl-c quit
         </Text>
       </Box>

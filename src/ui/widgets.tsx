@@ -138,11 +138,11 @@ export function Diagram({ lines }: { lines: DiagramLine[] }) {
 /**
  * Fixed-width text table, truncated to the pane.
  *
- * The footer line is a button: clicking "… 3 more" expands the table (the
- * mapping lives in App.tsx, which owns the mouse and can count the row). So
- * it says so — an affordance nobody can see is not one — but only while
- * mouse reporting is actually on, because `/mouse off` is a setting /help
- * recommends and a hint that lies is worse than none.
+ * The footer line is a button, and also a keystroke: ctrl-t expands the
+ * table, and clicking "… 3 more" does the same when clicks are on (the click
+ * mapping lives in App.tsx, which owns the mouse and can count the row). It
+ * says which, because an affordance nobody can see is not one and a hint
+ * that names a route the session does not have is worse than none.
  */
 export function Table({
   columns,
@@ -184,14 +184,19 @@ export function Table({
   );
 }
 
-/** The footer's wording, kept out of the JSX so the four states are legible
- *  as four states. Exported for the test that pins them. */
+/**
+ * The footer's wording, kept out of the JSX so the states are legible as
+ * states. Exported for the test that pins them.
+ *
+ * ctrl-t is named first and always, because clicks are off by default —
+ * an affordance whose only route is a mode you have to turn on is not one.
+ * The click is mentioned as well when it is actually live.
+ */
 export function tableFooter(hidden: number, expanded: boolean, clickable: boolean): string {
   const more = hidden > 0 ? `… ${hidden} more` : "";
-  if (!expanded) {
-    return clickable ? `${more} · click to expand` : `${more} · /mouse on to expand`;
-  }
-  return more === "" ? "▴ click to collapse" : `${more} · ▴ click to collapse`;
+  const how = `ctrl-t${clickable ? " or click" : ""}`;
+  if (!expanded) return `${more} · ${how} expands`;
+  return more === "" ? `▴ ${how} collapses` : `${more} · ▴ ${how} collapses`;
 }
 
 /** Wrap text to a width without splitting words. Ink wraps for us, but the
