@@ -1347,7 +1347,10 @@ export function App({
             </>
           ) : (
             <Box flexDirection="column" marginTop={1}>
-              <Welcome lines={["your data's whole journey, three panes wide"]} />
+              {/* The tagline lives on the hint lines just below the box in
+                  this pane, so the box itself carries only the hello — at 42
+                  usable columns there is no room for both beside the mark. */}
+              <Welcome compact width={inner} lines={[]} />
               <Box marginTop={1} />
               {/* Inside RStudio, dropping a file on the window opens it in
                   RStudio's own editor (and >5 MB hits its size dialog) — the
