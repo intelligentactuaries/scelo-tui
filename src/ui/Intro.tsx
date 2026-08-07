@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { keyFor, loadConfig, maskKey, saveConfig } from "../agent/config";
 import { discoverModels, getActive, llmAvailable, reloadConfig } from "../agent/llm";
 import { PROVIDERS, type Provider, type ProviderId, type Selection } from "../agent/providers";
-import { Welcome } from "./Mascot";
+import { MARK_ROWS, Welcome } from "./Mascot";
 import { Working } from "./spinner";
 import { MIN_WIDTH, theme } from "./theme";
 
@@ -287,7 +287,11 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
 
   // ── scrolling window ──────────────────────────────────────────────────────
   const saved = getActive();
-  const viewport = Math.max(6, termRows - 9);
+  // Everything above the list: the greeting's art plus its border, the
+  // padding, and the "choose a model" line. Written against MARK_ROWS rather
+  // than as a bare number so that changing the mark's height cannot silently
+  // push the bottom of this list off the screen.
+  const viewport = Math.max(6, termRows - (MARK_ROWS + 3));
   const start = Math.max(0, Math.min(cursor - Math.floor(viewport / 2), rows.length - viewport));
   const visible = rows.slice(Math.max(0, start), Math.max(0, start) + viewport);
 

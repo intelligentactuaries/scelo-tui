@@ -6,6 +6,10 @@ node_modules/
 # which is not something the repo should carry a copy of.
 .claude/
 
+# emojimark.py's "look at what you just baked" render — regenerable, and the
+# art it previews is already in Mascot.tsx.
+scripts/emojimark-preview.png
+
 # Belt and braces: the real config lives in ~/.config/scelo-tui, but
 # SCELO_TUI_CONFIG can point anywhere, and that file holds API keys.
 config.json
