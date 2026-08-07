@@ -40,6 +40,32 @@ export function useTerminalSize(): { cols: number; rows: number } {
 }
 
 /**
+ * Is this window taller than it is wide — as it LOOKS, not as it counts?
+ *
+ * A terminal cell is about twice as tall as it is wide, so 87x51 is a
+ * portrait window even though 87 > 51. Getting that backwards would put the
+ * stack on landscape terminals, which is the layout it exists to avoid.
+ */
+export function isPortrait(cols: number, rows: number): boolean {
+  return cols < rows * CELL_ASPECT;
+}
+
+/** Height-to-width of a terminal cell in the fonts this runs in. Close
+ *  enough at 2: the decision only has to be right near the diagonal, and
+ *  nothing on either side of it is a near-square window anyone works in. */
+const CELL_ASPECT = 2;
+
+/** The three pane widths, summing to EXACTLY `cols` so the borders span the
+ *  full terminal. Equal thirds, with the 0–2 leftover columns absorbed by
+ *  the last pane — invisible at that scale, and it keeps one shared content
+ *  width for the first two panes. */
+export function paneWidths(cols: number): { paneW: number; lastW: number } {
+  const paneW = Math.max(20, Math.floor(cols / 3));
+  const lastW = Math.max(20, cols - 2 * paneW);
+  return { paneW, lastW };
+}
+
+/**
  * The three pane heights, summing to EXACTLY `bodyH` so the stack fills the
  * terminal with no dead strip at the bottom.
  *

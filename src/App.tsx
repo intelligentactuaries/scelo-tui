@@ -49,9 +49,23 @@ import {
   useMouse,
   usePasteDeadlockHatch,
 } from "./ui/mouse";
-import { MIN_PANE_ROWS, chatLines, chatRows, paneHeights, useTerminalSize } from "./ui/size";
+import {
+  MIN_PANE_ROWS,
+  chatLines,
+  chatRows,
+  isPortrait,
+  paneHeights,
+  paneWidths,
+  useTerminalSize,
+} from "./ui/size";
 import { Spinner, Working } from "./ui/spinner";
-import { MIN_HEIGHT, MIN_WIDTH, theme } from "./ui/theme";
+import {
+  STACK_MIN_HEIGHT,
+  STACK_MIN_WIDTH,
+  WIDE_MIN_HEIGHT,
+  WIDE_MIN_WIDTH,
+  theme,
+} from "./ui/theme";
 import { fanIn, fanOut } from "./ui/diagram";
 import { CHART_LIST_TOP, ChartScreen, chartListWidth } from "./ui/ChartScreen";
 import { type ChartCard, buildChart, chartMenu } from "./ui/gallery";
@@ -166,12 +180,19 @@ export function App({
   const [tableOpen, setTableOpen] = useState(false);
   const started = useRef(false);
 
-  // Full-bleed stack: every pane is the whole width, and the three heights
-  // sum to exactly the body so the borders reach the bottom of the screen.
-  // Content width, not pane width: the Pane draws a border (1 col each side)
-  // AND paddingX={1} (1 more each side). Getting this wrong makes every
-  // full-width rule wrap onto a second line.
-  const inner = cols - 4;
+  // ── which way the panes go ──────────────────────────────────────────────
+  // Side by side is the layout: three full-height columns, each with its own
+  // composer. It needs 140 columns, and a PORTRAIT window does not have them
+  // — so a portrait window gets the same three panes stacked, which spends
+  // the budget it actually has. Landscape is untouched.
+  //
+  // A landscape window too narrow for columns stacks as well. That is not
+  // the portrait rule leaking: it is the alternative to refusing to draw,
+  // which is what it used to do.
+  const stacked = isPortrait(cols, rows) || cols < WIDE_MIN_WIDTH;
+  const tooSmall = stacked
+    ? cols < STACK_MIN_WIDTH || rows < STACK_MIN_HEIGHT
+    : rows < WIDE_MIN_HEIGHT;
 
   // Click anywhere in a pane to type there. Deliberately mapped on the ROW
   // alone rather than on the pane's exact rectangle: the panes tile the
@@ -194,9 +215,21 @@ export function App({
     /** How many rows the gallery's list has, when the gallery is up. */
     chartRows: number;
     /** First terminal row of each pane, in ORDER. Recomputed every render,
-     *  because the split moves when focus does. */
+     *  because the split moves when focus does. Stacked layout only. */
     paneTops: [number, number, number];
-  }>({ export: null, tableFooter: null, chartRows: 0, paneTops: [0, 0, 0] });
+    /** Which axis the panes tile, and how wide one is side by side — read by
+     *  the click map, which runs from a stdin listener rather than a render
+     *  and so cannot close over this render's values. */
+    stacked: boolean;
+    paneW: number;
+  }>({
+    export: null,
+    tableFooter: null,
+    chartRows: 0,
+    paneTops: [0, 0, 0],
+    stacked: false,
+    paneW: 1,
+  });
   useMouse(
     useCallback(
       ({ column, row }: { column: number; row: number }) => {
@@ -218,16 +251,23 @@ export function App({
         // The table's own footer: "… 3 more" is the affordance, so clicking
         // it is the gesture. It sits in HARD, which is also what the click
         // focuses — the row does two things because both are what you meant.
-        if (t.tableFooter !== null && row === t.tableFooter) {
+        // Side by side that row runs across all three panes, so the column
+        // has to agree it was HARD that was clicked; stacked, the row is
+        // HARD's alone.
+        const inHard = t.stacked || column > t.paneW * 2;
+        if (t.tableFooter !== null && row === t.tableFooter && inHard) {
           setTableOpen((v) => !v);
           setFocus("hard");
           return;
         }
-        // The last pane whose top is at or above this row. Clicking above
-        // the stack (the header) lands on SOFT, which is where a click with
-        // no better answer belongs.
-        let i = 0;
-        for (let n = 0; n < ORDER.length; n++) if (row >= t.paneTops[n]) i = n;
+        // Stacked, the panes tile the height, so the row picks one: the
+        // last whose top is at or above the click. Side by side they tile
+        // the width, so the column does. Either way every click has an
+        // unambiguous answer, and clicking a pane's border or the hint line
+        // under it does the thing you meant rather than nothing.
+        const i = t.stacked
+          ? t.paneTops.reduce((best, top, n) => (row >= top ? n : best), 0)
+          : Math.min(ORDER.length - 1, Math.max(0, Math.floor((column - 1) / t.paneW)));
         setFocus(ORDER[i]);
       },
       [charts, cols],
@@ -1126,16 +1166,17 @@ export function App({
     }
   });
 
-  if (cols < MIN_WIDTH || rows < MIN_HEIGHT) {
+  if (tooSmall) {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.warn}>Terminal too small for the three-pane stack.</Text>
+        <Text color={theme.warn}>Terminal too small for the three panes.</Text>
         <Text color={theme.mute}>
-          {cols}x{rows} — needs at least {MIN_WIDTH}x{MIN_HEIGHT}.{" "}
-          {/* Say which way to drag. The stack is height-hungry and most
-              windows are already wide enough, so "widen the window" sent
-              people the wrong way. */}
-          {rows < MIN_HEIGHT ? "Make the window taller." : "Widen the window."}
+          {cols}x{rows} — needs {WIDE_MIN_WIDTH}x{WIDE_MIN_HEIGHT} side by side, or{" "}
+          {STACK_MIN_WIDTH}x{STACK_MIN_HEIGHT} stacked.{" "}
+          {/* Say which way to drag. Which way depends on the shape it is
+              already closest to, and "widen the window" is the wrong advice
+              for something that is one row short of stacking. */}
+          {stacked ? "Make it taller." : "Widen it."}
         </Text>
       </Box>
     );
@@ -1175,29 +1216,41 @@ export function App({
   }
   clickTargets.current.chartRows = 0;
 
-  // ── the stack ───────────────────────────────────────────────────────────
-  // Header, optional banner, three panes, footer. The panes divide what is
-  // left, unevenly: `paneHeights` gives the focused one a share of the other
-  // two, because three equal thirds leave nowhere to put a table.
-  const bodyH = Math.max(3 * MIN_PANE_ROWS, rows - (banner ? 3 : 2));
-  const heights = paneHeights(bodyH, ORDER.indexOf(focus));
+  // ── the geometry, one set of numbers for both layouts ───────────────────
+  // Header, optional banner, three panes, footer. Side by side each pane is
+  // a third of the width and the full body height; stacked it is the full
+  // width and a share of the height — unequal, because three equal thirds
+  // leave nowhere to put a table.
+  const bodyH = Math.max(stacked ? 3 * MIN_PANE_ROWS : 12, rows - (banner ? 3 : 2));
+  const { paneW, lastW } = paneWidths(cols);
+  const widths: [number, number, number] = stacked ? [cols, cols, cols] : [paneW, paneW, lastW];
+  const heights: [number, number, number] = stacked
+    ? paneHeights(bodyH, ORDER.indexOf(focus))
+    : [bodyH, bodyH, bodyH];
   const [softH, toolsH, hardH] = heights;
-  // First terminal row of each pane, for the click map: row 1 is the header,
-  // then the banner if there is one, then the stack.
+  // Content width, not pane width: the Pane draws a border (1 col each side)
+  // AND paddingX={1} (1 more each side). Getting this wrong makes every
+  // full-width rule wrap onto a second line.
+  const [softW, toolsW, hardW] = widths.map((w) => w - 4) as [number, number, number];
+  // Every pane keeps its composer side by side — there is height for three.
+  // Stacked there is not, so only the focused one does; see chatRows.
+  const focused = (id: Focus) => !stacked || focus === id;
+  // First terminal row of each pane, for the click map when stacked: row 1
+  // is the header, then the banner if there is one, then the panes.
   const stackTop = 2 + (banner ? 1 : 0);
-  clickTargets.current.paneTops = [
-    stackTop,
-    stackTop + softH,
-    stackTop + softH + toolsH,
-  ];
+  clickTargets.current.paneTops = stacked
+    ? [stackTop, stackTop + softH, stackTop + softH + toolsH]
+    : [stackTop, stackTop, stackTop];
+  clickTargets.current.stacked = stacked;
+  clickTargets.current.paneW = Math.max(1, paneW);
 
   // Rows each pane has left for its own content. Every budget below is
   // measured against these rather than against the terminal, because in a
   // stack the panes have three different heights and only one of them has a
   // composer.
-  const softRoom = softH - PANE_CHROME - chatRows(softH, focus === "soft");
-  const toolsRoom = toolsH - PANE_CHROME - chatRows(toolsH, focus === "tools");
-  const hardRoom = hardH - PANE_CHROME - chatRows(hardH, focus === "hard");
+  const softRoom = softH - PANE_CHROME - chatRows(softH, focused("soft"));
+  const toolsRoom = toolsH - PANE_CHROME - chatRows(toolsH, focused("tools"));
+  const hardRoom = hardH - PANE_CHROME - chatRows(hardH, focused("hard"));
 
   // SOFT spends seven rows on the file and summary blocks before the reading
   // starts (eight when a column was dropped), then a blank, and Prose adds a
@@ -1267,7 +1320,7 @@ export function App({
         label: m.label,
         status: m.id === p.chosen?.id ? ("live" as const) : ("idle" as const),
       })),
-      { width: inner, accent: theme.tools, maxLeaves: max },
+      { width: toolsW, accent: theme.tools, maxLeaves: max },
     );
   })();
 
@@ -1346,7 +1399,7 @@ export function App({
         detail: `${runs.length} run${runs.length === 1 ? "" : "s"} · ctrl-e exports`,
         status: "live",
       },
-      { width: inner, accent: theme.hard, maxLeaves: max },
+      { width: hardW, accent: theme.hard, maxLeaves: max },
     );
   })();
 
@@ -1380,18 +1433,17 @@ export function App({
           inside each pane can only push the input to the bottom if there is
           a known bottom to push it to. Header + optional banner + footer are
           the rows this row does not get. */}
-      {/* Soft above tools above hard: the pipeline reads top to bottom, and
-          a terminal window is usually taller than it is wide — side by side
-          the three panes needed 140 columns and refused to draw below that,
-          which is most windows anyone actually opens. */}
-      <Box flexDirection="column" height={bodyH}>
+      {/* Side by side by default. Stacked — soft above tools above hard, the
+          order the pipeline runs in — when the window is portrait and has no
+          width to divide. */}
+      <Box flexDirection={stacked ? "column" : "row"} height={bodyH}>
         {/* ── SOFT ── */}
         <Pane
           title="SOFT · data"
           accent={theme.soft}
           focused={focus === "soft"}
-          width={cols}
-          height={softH}
+          width={widths[0]}
+          height={stacked ? softH : undefined}
         >
           <Head>file(s)</Head>
           {p ? (
@@ -1417,7 +1469,7 @@ export function App({
               <Box marginTop={1}>
                 <Prose
                   text={p.reading || p.degraded || "(no reading)"}
-                  width={inner}
+                  width={softW}
                   // What the pane has left after the file lines, the summary,
                   // its own blank row and the "…" Prose adds when it clips —
                   // NOT a slice of the terminal, which is what wrote this
@@ -1433,7 +1485,7 @@ export function App({
               {/* The tagline lives on the hint lines just below the box in
                   this pane, so the box itself carries only the hello — at 42
                   usable columns there is no room for both beside the mark. */}
-              <Welcome width={inner} lines={[]} />
+              <Welcome width={softW} lines={[]} />
               <Box marginTop={1} />
               {/* Inside RStudio, dropping a file on the window opens it in
                   RStudio's own editor (and >5 MB hits its size dialog) — the
@@ -1456,11 +1508,11 @@ export function App({
           )}
           <ChatView
             chat={softChat}
-            width={inner}
+            width={softW}
             accent={theme.soft}
             focused={focus === "soft"}
             lines={chatLines(softH)}
-            collapsed={focus !== "soft"}
+            collapsed={!focused("soft")}
           />
         </Pane>
 
@@ -1469,8 +1521,8 @@ export function App({
           title="TOOLS · models"
           accent={theme.tools}
           focused={focus === "tools"}
-          width={cols}
-          height={toolsH}
+          width={widths[1]}
+          height={stacked ? toolsH : undefined}
         >
           <Head>pipeline</Head>
           {foldStages ? (
@@ -1527,7 +1579,7 @@ export function App({
               {rationaleLines > 0 && (
                 <Prose
                   text={p.rationale}
-                  width={inner}
+                  width={toolsW}
                   maxLines={rationaleLines}
                   color={theme.mute}
                 />
@@ -1541,11 +1593,11 @@ export function App({
           )}
           <ChatView
             chat={toolsChat}
-            width={inner}
+            width={toolsW}
             accent={theme.tools}
             focused={focus === "tools"}
             lines={chatLines(toolsH)}
-            collapsed={focus !== "tools"}
+            collapsed={!focused("tools")}
           />
         </Pane>
 
@@ -1554,8 +1606,8 @@ export function App({
           title="HARD · output"
           accent={theme.hard}
           focused={focus === "hard"}
-          width={cols}
-          height={hardH}
+          width={widths[2]}
+          height={stacked ? hardH : undefined}
         >
           {p?.result ? (
             <>
@@ -1565,7 +1617,7 @@ export function App({
                 <Table
                   columns={p.result.columns}
                   rows={p.result.rows}
-                  width={inner}
+                  width={hardW}
                   maxRows={tableRows}
                   expanded={tableOpen}
                 />
@@ -1582,7 +1634,7 @@ export function App({
                   <BarPlot
                     values={p.result.series.values}
                     labels={p.result.series.labels}
-                    width={inner}
+                    width={hardW}
                     color={theme.hard}
                     max={plotBars}
                   />
@@ -1602,11 +1654,11 @@ export function App({
           )}
           <ChatView
             chat={hardChat}
-            width={inner}
+            width={hardW}
             accent={theme.hard}
             focused={focus === "hard"}
             lines={chatLines(hardH)}
-            collapsed={focus !== "hard"}
+            collapsed={!focused("hard")}
           />
         </Pane>
       </Box>
