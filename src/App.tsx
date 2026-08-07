@@ -29,6 +29,7 @@ import { detectHost, hostLabel, performHandoff, performOpen, planFor } from "./e
 import { type LiveMirror, type LiveRun, createLiveMirror } from "./export/live";
 import { slugify } from "./export/sce";
 import { type ChatHandle, type ChoiceList, ChatView, useChat } from "./ui/Chat";
+import { copyText, describeCopy, toTsv } from "./ui/clipboard";
 import { COMMAND_NAMES, helpText } from "./ui/commands";
 import { type DataFileListing, fmtBytes, fmtWhen, listDataFiles } from "./core/files";
 import {
@@ -153,6 +154,12 @@ export function App({
   const { cols, rows } = useTerminalSize();
 
   const [focus, setFocus] = useState<Focus>("soft");
+  /** The same fact as `focus`, readable from closures that outlive the render
+   *  they were built in — `handleIntent` is one, and a command that acts on
+   *  "the pane you are in" read whichever pane you were in when the callback
+   *  was last rebuilt, which is not the same question. */
+  const focusRef = useRef<Focus>("soft");
+  focusRef.current = focus;
   const [stages, setStages] = useState<Partial<Record<StageId, StageEvent>>>({});
   const [pipe, setPipe] = useState<PipelineResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -600,6 +607,38 @@ export function App({
           return next
             ? "diagrams on — TOOLS shows the dataset feeding each candidate analysis, HARD shows the runs feeding the output"
             : "diagrams off — the panes give the rows back to the tables and the chat";
+        }
+        case "copy": {
+          // Dragging a value out of a TUI catches box-drawing characters and
+          // column padding along with it, and the mouse has to be off (or
+          // shift held) for a drag to select at all. Copying the values
+          // themselves sidesteps both.
+          const want = (args[0] ?? "").toLowerCase();
+          if (want !== "" && !["table", "reading", "reply", "result", "data"].includes(want)) {
+            return "usage: /copy [table|reading|reply]";
+          }
+          // Bare `/copy` takes what the pane you are IN is showing — the
+          // thing you were looking at when you reached for the mouse.
+          const here = focusRef.current;
+          const pick =
+            want === "" ? (here === "soft" ? "reading" : here === "tools" ? "reply" : "table") : want;
+          let text = "";
+          let what = "";
+          if (pick === "table" || pick === "result" || pick === "data") {
+            if (!pipe?.result) return "no result yet — load a dataset first";
+            text = toTsv(pipe.result.columns, pipe.result.rows);
+            what = `${pipe.result.rows.length} row${pipe.result.rows.length === 1 ? "" : "s"} × ${pipe.result.columns.length} cols (tab-separated, pastes into Excel as columns)`;
+          } else if (pick === "reading") {
+            if (!pipe) return "no dataset loaded yet";
+            text = pipe.reading || pipe.degraded || "";
+            what = "the reading";
+          } else {
+            const last = [...chat.turns].reverse().find((t) => t.text.trim() !== "");
+            text = last?.text ?? "";
+            what = "the last reply";
+          }
+          if (text.trim() === "") return `nothing to copy — ${what} is empty`;
+          return describeCopy(copyText(text), what);
         }
         case "mouse": {
           const want = (args[0] ?? "").toLowerCase();

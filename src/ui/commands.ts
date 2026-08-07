@@ -33,6 +33,7 @@ export const COMMANDS: Command[] = [
   { name: "run", args: "<analysis|number>", hint: "switch the analysis", standalone: false },
   { name: "show", args: "<column>", hint: "one column's profile", standalone: false },
   { name: "graph", args: "[on|off]", hint: "the node/edge diagrams in tools and output", standalone: true },
+  { name: "copy", args: "[table|reading|reply]", hint: "put values on the clipboard, no dragging", standalone: true },
   { name: "mouse", args: "[on|off]", hint: "click-to-focus vs. selecting text to copy", standalone: true },
   { name: "help", hint: "everything you can type", standalone: true },
 ];
@@ -73,7 +74,9 @@ export function helpText(): string {
     "type / for the menu · ⏎ send · ctrl-e export · ctrl-o model",
     "↑↓ prompt history · ←→ move in the line · esc clear it",
     "ctrl-a start · ctrl-k/u kill to end/start · ctrl-w kill a word",
-    "copying: shift-drag selects while the mouse is on — or /mouse off",
+    "copying: /copy puts the real values on the clipboard — no dragging, no",
+    "  box-drawing characters. Dragging still works too: shift-drag while the",
+    "  mouse is on, or /mouse off to hand plain drag back to the terminal",
     "a bare number answers whichever menu was just printed",
     "anything else goes to the model",
   ].join("\n");
