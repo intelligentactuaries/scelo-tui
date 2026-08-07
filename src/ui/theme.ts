@@ -54,8 +54,12 @@ export const theme: {
   mascot: "#d97757",
 };
 
-/** Below this the three-pane layout stops being usable — each pane gets
- *  under ~45 columns, which cannot hold a results table. The app says so
- *  rather than rendering an unreadable mess. */
-export const MIN_WIDTH = 140;
-export const MIN_HEIGHT = 24;
+// The three panes are STACKED — soft above tools above hard — so the budget
+// that binds is rows, not columns. Side by side they needed 140 columns and
+// fell over in any window narrower than that, which is most windows people
+// actually open: a terminal is usually taller than it is wide.
+/** Enough for a table, a bar label and a line of chat without wrapping. */
+export const MIN_WIDTH = 56;
+/** Three panes, each needing its border, title, a line of transcript and a
+ *  composer, plus the header and footer rows around the stack. */
+export const MIN_HEIGHT = 32;

@@ -28,18 +28,21 @@ describe("tableFooter wording", () => {
 describe("tableFooterRow", () => {
   // The arithmetic itself is verified by clicking the row in a real
   // terminal; what a unit test can pin is that it MOVES the way the layout
-  // does — one row per result row, one for the error banner.
+  // does — one row per result row, one per row the HARD pane starts lower.
   test("each result row shown pushes the footer down by one", () => {
-    expect(tableFooterRow(6, false) - tableFooterRow(5, false)).toBe(1);
+    expect(tableFooterRow(6, 20) - tableFooterRow(5, 20)).toBe(1);
   });
 
-  test("the error banner pushes the whole pane down by one", () => {
-    expect(tableFooterRow(5, true) - tableFooterRow(5, false)).toBe(1);
+  test("it follows the HARD pane down the stack", () => {
+    // The pane's top moves whenever focus does, since the focused pane takes
+    // a share of the other two.
+    expect(tableFooterRow(5, 26) - tableFooterRow(5, 20)).toBe(6);
   });
 
-  test("the five-row default lands where the panes actually draw it", () => {
-    // Header, pane border, title, the "table" head and its blank, the
-    // headline, the blank above the table, its column header, five rows.
-    expect(tableFooterRow(5, false)).toBe(14);
+  test("the five-row default lands where the pane actually draws it", () => {
+    // From the pane's first row: its border, title, the "table" head and its
+    // blank, the headline, the blank above the table, its column header,
+    // then five rows.
+    expect(tableFooterRow(5, 20)).toBe(32);
   });
 });

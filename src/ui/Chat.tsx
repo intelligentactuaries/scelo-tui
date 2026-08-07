@@ -627,19 +627,45 @@ export function useChat(args: {
   };
 }
 
+/** A turn flattened to one line — a collapsed pane has exactly one to
+ *  spend, and a reply with newlines in it would take three. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 export function ChatView({
   chat,
   width,
   accent,
   focused,
   lines = 6,
+  collapsed = false,
 }: {
   chat: ChatHandle;
   width: number;
   accent: string;
   focused: boolean;
   lines?: number;
+  /** Rule and one line of the last reply, no composer.
+   *
+   *  Stacked, the three panes divide the terminal's height rather than its
+   *  width, and three full chat blocks eat more rows than three panes have
+   *  to give — TOOLS could not fit its own five stage lines. Only the
+   *  focused pane can be typed into anyway, so the other two spend their
+   *  rows on what they are actually for. */
+  collapsed?: boolean;
 }) {
+  if (collapsed) {
+    const last = chat.turns[chat.turns.length - 1];
+    return (
+      <Box flexDirection="column" flexGrow={1} justifyContent="flex-end">
+        <Text color={theme.chrome}>{"─".repeat(Math.max(0, width))}</Text>
+        <Text color={last?.role === "you" ? theme.you : theme.mute} wrap="truncate">
+          {last ? `${last.role === "you" ? "you" : "scelo"} ${oneLine(last.text)}` : "tab to type here"}
+        </Text>
+      </Box>
+    );
+  }
   // Show the tail — the most recent exchange is what matters in a pane this
   // short, and scrollback would need its own key handling.
   const recent = chat.turns.slice(-4);

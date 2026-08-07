@@ -49,7 +49,7 @@ import {
   useMouse,
   usePasteDeadlockHatch,
 } from "./ui/mouse";
-import { paneWidths, useTerminalSize } from "./ui/size";
+import { MIN_PANE_ROWS, chatLines, chatRows, paneHeights, useTerminalSize } from "./ui/size";
 import { Spinner, Working } from "./ui/spinner";
 import { MIN_HEIGHT, MIN_WIDTH, theme } from "./ui/theme";
 import { fanIn, fanOut } from "./ui/diagram";
@@ -64,10 +64,6 @@ const ORDER: Focus[] = ["soft", "tools", "hard"];
  *  certainly not a path, and inserting it would wedge the render. */
 const MAX_PASTE = 20_000;
 
-/** Rows the chat block owns at the bottom of every pane: its top margin, the
- *  rule, the transcript's minimum height, and the composer's frame. What the
- *  diagrams must not eat into. */
-const CHAT_ROWS = 1 + 1 + 6 + 3;
 /** A pane's own frame: two border rows and the title. */
 const PANE_CHROME = 3;
 /** Result rows the HARD table shows before it is expanded. */
@@ -78,16 +74,15 @@ const TABLE_ROWS = 5;
  * in the panes that is a button.
  *
  * Counted rather than measured, because Ink reports no absolute positions:
- * the header, the banner if there is one, the pane's top border and title,
+ * `hardTop` is where the HARD pane starts, then its top border and title,
  * the "table" head with its blank, the headline, the blank above the table,
  * its column header, then the body. The same accounting the diagrams already
- * do against `paneH`, and wrong the same way if the pane's layout changes —
- * hence its own test, and hence being the ONLY row bound to an action
- * besides the header.
+ * do against each pane's height, and wrong the same way if the pane's layout
+ * changes — hence its own test, and hence being the ONLY row bound to an
+ * action besides the header.
  */
-export function tableFooterRow(shown: number, banner: boolean): number {
-  const paneTop = 2 + (banner ? 1 : 0);
-  return paneTop + 1 + 2 + 1 + 1 + 1 + shown + 1;
+export function tableFooterRow(shown: number, hardTop: number): number {
+  return hardTop + 1 + 2 + 1 + 1 + 1 + shown + 1;
 }
 
 /** Why a paste was refused. Inside RStudio the "drop the file" advice is
@@ -116,6 +111,10 @@ const STAGE_GERUND: Record<StageId, string> = {
   pick: "choosing an analysis",
   run: "running the analysis",
 };
+
+/** The stages, in order — used both to draw the list and to budget its rows,
+ *  so the two cannot drift apart. */
+const STAGE_ORDER = Object.keys(STAGE_LABEL) as StageId[];
 
 function activeStageLabel(stages: Partial<Record<StageId, StageEvent>>): string {
   for (const id of Object.keys(STAGE_LABEL) as StageId[]) {
@@ -167,21 +166,17 @@ export function App({
   const [tableOpen, setTableOpen] = useState(false);
   const started = useRef(false);
 
-  // Full-bleed thirds: the three widths sum to exactly `cols`, remainder
-  // absorbed by the HARD pane, so the borders reach the screen edge instead
-  // of leaving a dead strip on the right.
-  const { paneW, lastW } = paneWidths(cols);
+  // Full-bleed stack: every pane is the whole width, and the three heights
+  // sum to exactly the body so the borders reach the bottom of the screen.
   // Content width, not pane width: the Pane draws a border (1 col each side)
   // AND paddingX={1} (1 more each side). Getting this wrong makes every
-  // full-width rule wrap onto a second line. Shared by all three panes —
-  // HARD is at most 2 columns wider than its content needs, invisibly.
-  const inner = paneW - 4;
+  // full-width rule wrap onto a second line.
+  const inner = cols - 4;
 
-  // Click anywhere in a column to type there. Deliberately mapped on the
-  // column alone rather than on the pane's exact rectangle: the panes tile
-  // the width, so every click has an unambiguous answer, and clicking the
-  // header or the hint line under a pane does the thing you meant rather
-  // than nothing.
+  // Click anywhere in a pane to type there. Deliberately mapped on the ROW
+  // alone rather than on the pane's exact rectangle: the panes tile the
+  // height, so every click has an unambiguous answer, and clicking a pane's
+  // border or title does the thing you meant rather than nothing.
   // Three rows mean something more than focus, and all three are rows whose
   // position can be COUNTED rather than measured — Ink reports no geometry,
   // so a click target has to be arithmetic the render agrees with. The
@@ -198,7 +193,10 @@ export function App({
     tableFooter: number | null;
     /** How many rows the gallery's list has, when the gallery is up. */
     chartRows: number;
-  }>({ export: null, tableFooter: null, chartRows: 0 });
+    /** First terminal row of each pane, in ORDER. Recomputed every render,
+     *  because the split moves when focus does. */
+    paneTops: [number, number, number];
+  }>({ export: null, tableFooter: null, chartRows: 0, paneTops: [0, 0, 0] });
   useMouse(
     useCallback(
       ({ column, row }: { column: number; row: number }) => {
@@ -220,15 +218,19 @@ export function App({
         // The table's own footer: "… 3 more" is the affordance, so clicking
         // it is the gesture. It sits in HARD, which is also what the click
         // focuses — the row does two things because both are what you meant.
-        if (t.tableFooter !== null && row === t.tableFooter && column > paneW * 2) {
+        if (t.tableFooter !== null && row === t.tableFooter) {
           setTableOpen((v) => !v);
           setFocus("hard");
           return;
         }
-        const i = Math.min(ORDER.length - 1, Math.max(0, Math.floor((column - 1) / paneW)));
+        // The last pane whose top is at or above this row. Clicking above
+        // the stack (the header) lands on SOFT, which is where a click with
+        // no better answer belongs.
+        let i = 0;
+        for (let n = 0; n < ORDER.length; n++) if (row >= t.paneTops[n]) i = n;
         setFocus(ORDER[i]);
       },
-      [paneW, charts, cols],
+      [charts, cols],
     ),
   );
   clickTargets.current.export = pipe?.result ? () => doExport(undefined, active) : null;
@@ -1127,9 +1129,13 @@ export function App({
   if (cols < MIN_WIDTH || rows < MIN_HEIGHT) {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text color={theme.warn}>Terminal too small for the three-pane layout.</Text>
+        <Text color={theme.warn}>Terminal too small for the three-pane stack.</Text>
         <Text color={theme.mute}>
-          {cols}x{rows} — needs at least {MIN_WIDTH}x{MIN_HEIGHT}. Widen the window.
+          {cols}x{rows} — needs at least {MIN_WIDTH}x{MIN_HEIGHT}.{" "}
+          {/* Say which way to drag. The stack is height-hungry and most
+              windows are already wide enough, so "widen the window" sent
+              people the wrong way. */}
+          {rows < MIN_HEIGHT ? "Make the window taller." : "Widen the window."}
         </Text>
       </Box>
     );
@@ -1169,6 +1175,54 @@ export function App({
   }
   clickTargets.current.chartRows = 0;
 
+  // ── the stack ───────────────────────────────────────────────────────────
+  // Header, optional banner, three panes, footer. The panes divide what is
+  // left, unevenly: `paneHeights` gives the focused one a share of the other
+  // two, because three equal thirds leave nowhere to put a table.
+  const bodyH = Math.max(3 * MIN_PANE_ROWS, rows - (banner ? 3 : 2));
+  const heights = paneHeights(bodyH, ORDER.indexOf(focus));
+  const [softH, toolsH, hardH] = heights;
+  // First terminal row of each pane, for the click map: row 1 is the header,
+  // then the banner if there is one, then the stack.
+  const stackTop = 2 + (banner ? 1 : 0);
+  clickTargets.current.paneTops = [
+    stackTop,
+    stackTop + softH,
+    stackTop + softH + toolsH,
+  ];
+
+  // Rows each pane has left for its own content. Every budget below is
+  // measured against these rather than against the terminal, because in a
+  // stack the panes have three different heights and only one of them has a
+  // composer.
+  const softRoom = softH - PANE_CHROME - chatRows(softH, focus === "soft");
+  const toolsRoom = toolsH - PANE_CHROME - chatRows(toolsH, focus === "tools");
+  const hardRoom = hardH - PANE_CHROME - chatRows(hardH, focus === "hard");
+
+  // SOFT spends seven rows on the file and summary blocks before the reading
+  // starts (eight when a column was dropped), then a blank, and Prose adds a
+  // "…" row of its own when it clips.
+  const softFixed = 7 + (p?.clean && p.clean.droppedColumns.length > 0 ? 1 : 0);
+  // The block costs its own blank row and the "…" Prose adds when it clips,
+  // so two rows buy nothing: below that it does not appear at all rather
+  // than appearing on top of the pane's border.
+  const readingLines = softRoom - softFixed - 2;
+  // TOOLS spends two rows on its head and five on the stage list. Stacked,
+  // that is the whole pane — and a finished stage list is five ticks, while
+  // the analysis it chose and why is what TOOLS is actually for. So once the
+  // run is over and the rows are tight, the list folds to one line. It never
+  // folds mid-run: while something is moving, the moving thing IS the news.
+  const stageStates = (Object.keys(STAGE_LABEL) as StageId[]).map((id) => stages[id]?.state);
+  const stagesSettled =
+    !running && stageStates.every((st) => st === "done" || st === "skipped");
+  const foldStages = stagesSettled && toolsRoom < 12;
+  const stageRows = foldStages ? 1 : STAGE_ORDER.length;
+  // What is left decides how much of the analysis block survives, in
+  // priority order: the head and the chosen analysis, then the rationale,
+  // then the hint.
+  const toolsAfterStages = toolsRoom - 2 - stageRows;
+  const rationaleLines = Math.max(0, Math.min(4, toolsAfterStages - 3 - 1 - 1));
+
   // ── the two canvases, as a terminal draws them ──────────────────────────
   // The IDE puts a node/edge canvas in each of these panes: TOOLS fans the
   // dataset OUT to its candidate models, HARD fans the results back IN to a
@@ -1176,11 +1230,10 @@ export function App({
   // budgeted in ROWS — the panes already own a stage list, a rationale, a
   // table and a chat, so the diagram takes what is left and truncates itself
   // rather than pushing the composer off the bottom of the screen.
-  const paneH = Math.max(12, rows - (banner ? 3 : 2));
-  // Ink CLIPS a pane that overflows its fixed-height row, and it clips
-  // silently — the symptom is a box missing its top border, not an error. So
-  // the budget is counted honestly against everything else the pane draws,
-  // with a row left spare.
+  // Ink CLIPS a pane that overflows its fixed height, and it clips silently —
+  // the symptom is a box missing its bottom border, not an error. So the
+  // budget is counted honestly against everything else the pane draws, with a
+  // row left spare.
   const fanOutLeaves = (budget: number) => Math.floor((budget - 5) / 3);
   const fanInLeaves = (budget: number) => Math.floor((budget - 6) / 3);
 
@@ -1188,14 +1241,12 @@ export function App({
   const toolsDiagram = (() => {
     if (!showGraph || !p?.chosen || eligible.length === 0) return [];
     const spent =
-      PANE_CHROME +
       2 + // "pipeline" head
       5 + // one line per stage
       2 + // "analyses" head
       4 + // the rationale, at its cap
-      1 + // the /run hint
-      CHAT_ROWS;
-    const max = fanOutLeaves(paneH - spent - 1);
+      1; // the /run hint
+    const max = fanOutLeaves(toolsRoom - spent - 1);
     if (max < 1) return [];
     // The chosen analysis leads; the rest are the alternatives `/run` offers.
     const ordered = [
@@ -1224,23 +1275,41 @@ export function App({
   // Expanded, the table takes every row the plot and the flow diagram were
   // using — which is the deal the click makes, and why both stand down while
   // it is open rather than being squeezed into two rows each.
-  const tableRoom =
-    paneH -
-    PANE_CHROME -
+  const tableFits =
+    hardRoom -
     2 - // "table" head
     1 - // the headline
     1 - // the blank above the table
     1 - // the table's own header row
-    1 - // the footer line
-    CHAT_ROWS;
-  const tableRows = tableOpen ? Math.max(TABLE_ROWS, tableRoom) : TABLE_ROWS;
+    1; // the footer line
+  // Even shut, the table cannot show five rows in a pane that has three: a
+  // stacked HARD is a third of the height a column was, and overflowing it
+  // draws the plot over the pane's own border.
+  const tableRows = Math.max(1, tableOpen ? tableFits : Math.min(TABLE_ROWS, tableFits));
   const tableBody = p?.result ? Math.min(tableRows, p.result.rows.length) : 0;
   // Only a truncated table has a footer to click; an expanded one always
   // does, because collapsing it again has to be reachable the same way.
   clickTargets.current.tableFooter =
     p?.result && (tableOpen || p.result.rows.length > tableBody)
-      ? tableFooterRow(tableBody, banner !== null)
+      ? tableFooterRow(tableBody, clickTargets.current.paneTops[2])
       : null;
+  // Bars the sparkline may draw, from whatever the table left. Zero means it
+  // does not appear at all — `/charts` has the full-size version, and half a
+  // plot drawn over the pane's border is worse than none.
+  const plotBars = tableOpen
+    ? 0
+    : Math.min(
+        5,
+        hardRoom -
+          2 - // "table" head
+          1 - // the headline
+          1 - // the blank above the table
+          1 - // the table's own header row
+          tableBody -
+          (p?.result && p.result.rows.length > tableBody ? 1 : 0) -
+          2 - // "plot" head
+          1, // the series label
+      );
 
   const hardDiagram = (() => {
     if (!showGraph || !p?.result || tableOpen) return [];
@@ -1248,17 +1317,15 @@ export function App({
     // what is left of the pane, or it does not appear.
     const body = p.result.rows.length;
     const spent =
-      PANE_CHROME +
       2 + // "table" head
       1 + // the headline
       1 + // the blank above the table
       1 + // the table's own header row
-      Math.min(TABLE_ROWS, body) +
-      (body > TABLE_ROWS ? 1 : 0) +
-      (p.result.series ? 3 + Math.min(5, p.result.series.values.length) : 0) +
-      2 + // "flow" head
-      CHAT_ROWS;
-    const max = fanInLeaves(paneH - spent - 1);
+      Math.min(tableRows, body) +
+      (body > tableRows ? 1 : 0) +
+      (p.result.series ? 3 + Math.min(plotBars, p.result.series.values.length) : 0) +
+      2; // "flow" head
+    const max = fanInLeaves(hardRoom - spent - 1);
     if (max < 1) return [];
     // Every analysis the session actually ran — the provenance of the numbers
     // above. liveRuns is appended to by /run and by the pipeline's own pick.
@@ -1313,9 +1380,19 @@ export function App({
           inside each pane can only push the input to the bottom if there is
           a known bottom to push it to. Header + optional banner + footer are
           the rows this row does not get. */}
-      <Box height={Math.max(12, rows - (banner ? 3 : 2))}>
+      {/* Soft above tools above hard: the pipeline reads top to bottom, and
+          a terminal window is usually taller than it is wide — side by side
+          the three panes needed 140 columns and refused to draw below that,
+          which is most windows anyone actually opens. */}
+      <Box flexDirection="column" height={bodyH}>
         {/* ── SOFT ── */}
-        <Pane title="SOFT · data" accent={theme.soft} focused={focus === "soft"} width={paneW}>
+        <Pane
+          title="SOFT · data"
+          accent={theme.soft}
+          focused={focus === "soft"}
+          width={cols}
+          height={softH}
+        >
           <Head>file(s)</Head>
           {p ? (
             <>
@@ -1336,14 +1413,20 @@ export function App({
               {p.clean && p.clean.droppedColumns.length > 0 && (
                 <Text color={theme.warn}>dropped: {p.clean.droppedColumns.join(", ")}</Text>
               )}
+              {readingLines > 0 && (
               <Box marginTop={1}>
                 <Prose
                   text={p.reading || p.degraded || "(no reading)"}
                   width={inner}
-                  maxLines={Math.max(4, rows - 24)}
+                  // What the pane has left after the file lines, the summary,
+                  // its own blank row and the "…" Prose adds when it clips —
+                  // NOT a slice of the terminal, which is what wrote this
+                  // paragraph over the pane's border.
+                  maxLines={readingLines}
                   color={p.reading ? theme.fg : theme.mute}
                 />
               </Box>
+              )}
             </>
           ) : (
             <Box flexDirection="column" marginTop={1}>
@@ -1371,13 +1454,36 @@ export function App({
               <Text color={theme.mute}>or type /example for the IDE's sample data</Text>
             </Box>
           )}
-          <ChatView chat={softChat} width={inner} accent={theme.soft} focused={focus === "soft"} />
+          <ChatView
+            chat={softChat}
+            width={inner}
+            accent={theme.soft}
+            focused={focus === "soft"}
+            lines={chatLines(softH)}
+            collapsed={focus !== "soft"}
+          />
         </Pane>
 
         {/* ── TOOLS ── */}
-        <Pane title="TOOLS · models" accent={theme.tools} focused={focus === "tools"} width={paneW}>
+        <Pane
+          title="TOOLS · models"
+          accent={theme.tools}
+          focused={focus === "tools"}
+          width={cols}
+          height={toolsH}
+        >
           <Head>pipeline</Head>
-          {(Object.keys(STAGE_LABEL) as StageId[]).map((id) => {
+          {foldStages ? (
+            <Text color={theme.ok} wrap="truncate">
+              ✓ {STAGE_ORDER.length} stages ·{" "}
+              <Text color={theme.mute}>
+                {stageStates.filter((st) => st === "skipped").length > 0
+                  ? `${stageStates.filter((st) => st === "done").length} run, ${stageStates.filter((st) => st === "skipped").length} skipped`
+                  : "all done"}
+              </Text>
+            </Text>
+          ) : (
+          (Object.keys(STAGE_LABEL) as StageId[]).map((id) => {
             const st = stages[id];
             // The live stage pulses; every other state is a settled glyph. So
             // the one line that is still moving is the one still working.
@@ -1403,8 +1509,9 @@ export function App({
                 {st?.detail ? <Text color={theme.mute}> · {st.detail}</Text> : null}
               </Text>
             );
-          })}
-          {p?.chosen && (
+          })
+          )}
+          {p?.chosen && toolsAfterStages >= 3 && (
             <>
               {/* The diagram shows the chosen analysis AND the alternatives,
                   so it earns the plural. Without the room for it, the pane
@@ -1413,10 +1520,23 @@ export function App({
               {toolsDiagram.length > 0 ? (
                 <Diagram lines={toolsDiagram} />
               ) : (
-                <Text color={theme.tools}>{p.chosen.label}</Text>
+                <Text color={theme.tools} wrap="truncate">
+                  {p.chosen.label}
+                </Text>
               )}
-              <Prose text={p.rationale} width={inner} maxLines={4} color={theme.mute} />
-              <Text color={theme.mute}>/run to change · /list for the menu</Text>
+              {rationaleLines > 0 && (
+                <Prose
+                  text={p.rationale}
+                  width={inner}
+                  maxLines={rationaleLines}
+                  color={theme.mute}
+                />
+              )}
+              {/* The last thing to go: what the pane says NEXT matters less
+                  than what it is showing, and /help lists both commands. */}
+              {toolsAfterStages >= 5 && (
+                <Text color={theme.mute}>/run to change · /list for the menu</Text>
+              )}
             </>
           )}
           <ChatView
@@ -1424,11 +1544,19 @@ export function App({
             width={inner}
             accent={theme.tools}
             focused={focus === "tools"}
+            lines={chatLines(toolsH)}
+            collapsed={focus !== "tools"}
           />
         </Pane>
 
         {/* ── HARD ── */}
-        <Pane title="HARD · output" accent={theme.hard} focused={focus === "hard"} width={lastW}>
+        <Pane
+          title="HARD · output"
+          accent={theme.hard}
+          focused={focus === "hard"}
+          width={cols}
+          height={hardH}
+        >
           {p?.result ? (
             <>
               <Head>table</Head>
@@ -1442,7 +1570,7 @@ export function App({
                   expanded={tableOpen}
                 />
               </Box>
-              {p.result.series && !tableOpen && (
+              {p.result.series && plotBars > 0 && (
                 <>
                   <Head>plot</Head>
                   {/* The pane's plot is a sparkline's budget — five rows and
@@ -1456,7 +1584,7 @@ export function App({
                     labels={p.result.series.labels}
                     width={inner}
                     color={theme.hard}
-                    max={5}
+                    max={plotBars}
                   />
                 </>
               )}
@@ -1472,7 +1600,14 @@ export function App({
               <Text color={theme.mute}>no output yet</Text>
             </Box>
           )}
-          <ChatView chat={hardChat} width={inner} accent={theme.hard} focused={focus === "hard"} />
+          <ChatView
+            chat={hardChat}
+            width={inner}
+            accent={theme.hard}
+            focused={focus === "hard"}
+            lines={chatLines(hardH)}
+            collapsed={focus !== "hard"}
+          />
         </Pane>
       </Box>
 

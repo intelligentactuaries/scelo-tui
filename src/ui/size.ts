@@ -39,13 +39,54 @@ export function useTerminalSize(): { cols: number; rows: number } {
   return size;
 }
 
-/** The three pane widths, summing to EXACTLY `cols` so the borders span the
- *  full terminal. Equal thirds, with the 0–2 leftover columns absorbed by
- *  the last pane — invisible at that scale, and it keeps one shared content
- *  width for the first two panes. (The old `floor((cols - 8) / 3)` left up
- *  to ten columns of dead space on the right.) */
-export function paneWidths(cols: number): { paneW: number; lastW: number } {
-  const paneW = Math.max(20, Math.floor(cols / 3));
-  const lastW = Math.max(20, cols - 2 * paneW);
-  return { paneW, lastW };
+/**
+ * The three pane heights, summing to EXACTLY `bodyH` so the stack fills the
+ * terminal with no dead strip at the bottom.
+ *
+ * Not equal thirds. The focused pane is the one being read and typed into,
+ * and three equal shares of a 46-row terminal leave each pane about four
+ * rows of content once its chrome and chat block are paid for — which is
+ * nowhere to put a table. So the focused pane takes a share from the other
+ * two, capped so an unfocused pane never drops below what its own furniture
+ * needs. The remainder lands on the focused pane, where an extra row is
+ * worth the most.
+ */
+export function paneHeights(bodyH: number, focusIndex: number): [number, number, number] {
+  const base = Math.floor(bodyH / 3);
+  const give = Math.max(0, Math.min(base - MIN_PANE_ROWS, Math.round(base / 6)));
+  const quiet = base - give;
+  const out: [number, number, number] = [quiet, quiet, quiet];
+  out[Math.min(2, Math.max(0, focusIndex))] = bodyH - 2 * quiet;
+  return out;
+}
+
+/** What an unfocused pane cannot go below: its two borders and title, the
+ *  rule above the chat, one line of transcript, and the composer's frame. */
+export const MIN_PANE_ROWS = 3 + 1 + 1 + 3;
+
+/**
+ * Rows the chat block should give its transcript in a pane this tall.
+ *
+ * Fixed at six it was fine in a full-height column and impossible in a
+ * stacked third: `minHeight` on the transcript does not shrink, so the pane
+ * overflows its row and Ink squashes its other children instead — the
+ * symptom being section headings that silently vanish, not an error. Capped
+ * at four rather than six for the same reason: in a stack those two rows are
+ * worth more to the pane's own content than to a fourth-oldest reply.
+ */
+export function chatLines(paneRows: number): number {
+  return Math.max(1, Math.min(4, paneRows - 11));
+}
+
+/**
+ * Rows the chat block costs a pane.
+ *
+ * A collapsed pane keeps its rule and one line of the last reply and drops
+ * the composer — only the focused pane can be typed into, so the other two
+ * spend those rows on their own content instead. Without this the stack does
+ * not fit: three full chat blocks at six transcript lines each is 33 rows
+ * before a single pane has drawn anything of its own.
+ */
+export function chatRows(paneRows: number, focused: boolean): number {
+  return focused ? 1 + 1 + chatLines(paneRows) + 3 : 1 + 1;
 }
