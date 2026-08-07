@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MIN_PANE_ROWS, chatLines, paneHeights } from "./size";
+import { MIN_PANE_ROWS, chatLines, isPortrait, paneHeights, paneWidths } from "./size";
 
 describe("paneHeights", () => {
   test("the three panes sum to EXACTLY the body height", () => {
@@ -62,5 +62,43 @@ describe("chatLines", () => {
     expect(chatLines(14)).toBe(3);
     expect(chatLines(9)).toBe(1);
     expect(chatLines(0)).toBe(1);
+  });
+});
+
+describe("isPortrait", () => {
+  test("the shape as it LOOKS, not as it counts", () => {
+    // A cell is about twice as tall as it is wide, so 87x51 is a portrait
+    // window even though 87 > 51. Backwards, this puts the stacked layout on
+    // landscape terminals — the one place it must never appear.
+    expect(isPortrait(87, 51)).toBe(true);
+    expect(isPortrait(175, 46)).toBe(false);
+  });
+
+  test("a wide short terminal is landscape however few rows it has", () => {
+    expect(isPortrait(200, 24)).toBe(false);
+    expect(isPortrait(140, 40)).toBe(false);
+  });
+
+  test("a narrow tall terminal is portrait however many columns it has", () => {
+    expect(isPortrait(80, 60)).toBe(true);
+    expect(isPortrait(100, 51)).toBe(true);
+  });
+});
+
+describe("paneWidths", () => {
+  test("the three panes sum to EXACTLY the terminal width", () => {
+    // No dead strip on the right, no overflow — the borders reach the edge.
+    for (let cols = 60; cols <= 400; cols++) {
+      const { paneW, lastW } = paneWidths(cols);
+      expect(paneW + paneW + lastW, `cols=${cols}`).toBe(cols);
+    }
+  });
+
+  test("the remainder lands on the last pane, never more than 2 columns", () => {
+    for (let cols = 60; cols <= 400; cols++) {
+      const { paneW, lastW } = paneWidths(cols);
+      expect(lastW - paneW, `cols=${cols}`).toBeGreaterThanOrEqual(0);
+      expect(lastW - paneW, `cols=${cols}`).toBeLessThanOrEqual(2);
+    }
   });
 });
