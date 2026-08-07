@@ -5,23 +5,21 @@ import { tableFooterRow } from "../App";
 import { tableFooter } from "./widgets";
 
 describe("tableFooter wording", () => {
-  test("collapsed and truncated, it counts what is hidden and offers the click", () => {
-    expect(tableFooter(3, false, true)).toBe("… 3 more · click to expand");
-  });
-
-  test("with the mouse off it points at the fix instead of lying", () => {
-    // `/mouse off` is a setting /help recommends for copying text out, and
-    // an affordance that does nothing is worse than none.
-    expect(tableFooter(3, false, false)).toBe("… 3 more · /mouse on to expand");
+  test("the keystroke is named whether or not clicks are on", () => {
+    // Clicks are off by default so that drag-select keeps working, which
+    // makes a click-only affordance no affordance at all.
+    expect(tableFooter(3, false, false)).toBe("… 3 more · ctrl-t expands");
+    expect(tableFooter(3, false, true)).toBe("… 3 more · ctrl-t or click expands");
   });
 
   test("expanded, the way back is on the same line", () => {
-    expect(tableFooter(0, true, true)).toBe("▴ click to collapse");
+    expect(tableFooter(0, true, false)).toBe("▴ ctrl-t collapses");
+    expect(tableFooter(0, true, true)).toBe("▴ ctrl-t or click collapses");
   });
 
   test("expanded and STILL truncated says both", () => {
     // A pane 20 rows tall cannot hold a 40-row result even wide open.
-    expect(tableFooter(12, true, true)).toBe("… 12 more · ▴ click to collapse");
+    expect(tableFooter(12, true, false)).toBe("… 12 more · ▴ ctrl-t collapses");
   });
 });
 
