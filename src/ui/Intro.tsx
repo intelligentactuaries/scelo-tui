@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { keyFor, loadConfig, maskKey, saveConfig } from "../agent/config";
 import { discoverModels, getActive, llmAvailable, reloadConfig } from "../agent/llm";
 import { PROVIDERS, type Provider, type ProviderId, type Selection } from "../agent/providers";
-import { MARK_ROWS, Welcome } from "./Mascot";
+import { COMPACT_ROWS, Welcome, markRows } from "./Mascot";
 import { Working } from "./spinner";
 import { MIN_WIDTH, theme } from "./theme";
 
@@ -287,17 +287,27 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
 
   // ── scrolling window ──────────────────────────────────────────────────────
   const saved = getActive();
-  // Everything above the list: the greeting's art plus its border, the
-  // padding, and the "choose a model" line. Written against MARK_ROWS rather
-  // than as a bare number so that changing the mark's height cannot silently
-  // push the bottom of this list off the screen.
-  const viewport = Math.max(6, termRows - (MARK_ROWS + 3));
+  // The big greeting is 18 rows with its border. That is a fine share of a
+  // full-height terminal and most of a short one, so a short one gets the
+  // small mark instead — a hello that leaves no room for the thing it is
+  // introducing has stopped being a hello.
+  const compact = termRows < COMPACT_ROWS;
+  // Everything that is not the list: this box's padding (2), the greeting's
+  // border (2) and art, the "choose a model" line with its margin (2), and
+  // the footer hint with its margin (2) — nine rows plus the mark. Counted
+  // against markRows rather than baked into a constant, because the mark's
+  // height is exactly the thing that changes. (Providers separated by a blank
+  // line still spend rows this does not count; that predates the emoji and
+  // only bites a list long enough to scroll.)
+  const viewport = Math.max(6, termRows - (markRows(compact) + 9));
   const start = Math.max(0, Math.min(cursor - Math.floor(viewport / 2), rows.length - viewport));
   const visible = rows.slice(Math.max(0, start), Math.max(0, start) + viewport);
 
   return (
     <Box flexDirection="column" padding={1}>
       <Welcome
+        width={cols - 2}
+        compact={compact}
         lines={[
           "the agentic actuarial workstation — soft data → tools → hard data",
           "pick the model that will drive it, then drop a CSV in",

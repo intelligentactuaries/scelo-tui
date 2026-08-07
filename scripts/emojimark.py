@@ -47,7 +47,13 @@ def raster(emoji: str, size: int) -> Image.Image:
     side = max(glyph.size)
     padded = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     padded.paste(glyph, ((side - glyph.width) // 2, (side - glyph.height) // 2))
-    return modal_resize(padded, size)
+    small = modal_resize(padded, size)
+    # Squaring the glyph before the resize keeps the face round; it also
+    # leaves a rim of empty pixels, and at 36 across that rim is a blank
+    # terminal row above and below the art. Trim it AFTER downsampling, so
+    # the aspect ratio is already settled and only genuinely empty cells go.
+    box = small.getbbox()
+    return small.crop(box) if box else small
 
 
 # Colours close enough to be the same ink. Coarse on purpose: the face is a
@@ -105,16 +111,18 @@ def main() -> None:
     # Half-blocks make a cell twice as tall as it is wide in pixels, which is
     # roughly the shape of a terminal cell — so a square image wants as many
     # columns as it has pixel rows.
-    size = ROWS * 2
-    img = raster(EMOJI, size)
+    img = raster(EMOJI, ROWS * 2)
     px = img.load()
+    width, height = img.size
+    rows_out = (height + 1) // 2
 
     rows: list[list[tuple[str, str | None, str | None]]] = []
-    for r in range(ROWS):
+    for r in range(rows_out):
         cells: list[tuple[str, str | None, str | None]] = []
-        for c in range(size):
+        for c in range(width):
             top = px[c, 2 * r]
-            bot = px[c, 2 * r + 1]
+            # An odd pixel height leaves the last row with no bottom half.
+            bot = px[c, 2 * r + 1] if 2 * r + 1 < height else (0, 0, 0, 0)
             t_on = top[3] >= ALPHA
             b_on = bot[3] >= ALPHA
             if t_on and b_on:
@@ -146,16 +154,15 @@ def main() -> None:
 
     out = Path(__file__).resolve().parent / "emojimark-preview.png"
     # One cell drawn as it renders: 1 pixel wide, 2 tall, blown up 16x.
-    preview = Image.new("RGB", (size, size), (18, 18, 18))
+    preview = Image.new("RGB", (width, height), (18, 18, 18))
     ppx = preview.load()
-    for r in range(ROWS):
-        for c in range(size):
-            for half in (0, 1):
-                p = px[c, 2 * r + half]
-                if p[3] >= ALPHA:
-                    ppx[c, 2 * r + half] = p[:3]
-    preview.resize((size * 16, size * 16), Image.NEAREST).save(out)
-    print(f"\n# preview: {out}", file=sys.stderr)
+    for y in range(height):
+        for x in range(width):
+            if px[x, y][3] >= ALPHA:
+                ppx[x, y] = px[x, y][:3]
+    zoom = max(1, 320 // max(width, height))
+    preview.resize((width * zoom, height * zoom), Image.NEAREST).save(out)
+    print(f"\n# {rows_out} rows x {width} cols · preview: {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":
