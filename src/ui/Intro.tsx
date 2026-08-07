@@ -407,7 +407,7 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
       {cols < MIN_WIDTH && (
         <Box marginTop={1}>
           <Text color={theme.warn}>
-            terminal is {cols} columns — the three-pane layout needs {MIN_WIDTH}. Widen it before
+            terminal is {cols} columns — the pane stack needs {MIN_WIDTH}. Widen it before
             starting.
           </Text>
         </Box>

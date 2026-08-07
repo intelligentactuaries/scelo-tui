@@ -15,18 +15,25 @@ export function Pane({
   accent,
   focused,
   width,
+  height,
   children,
 }: {
   title: string;
   accent: string;
   focused: boolean;
   width: number;
+  /** Fixed rows. The stacked layout hands each pane its share so the three
+   *  together fill the terminal exactly; Ink clips anything that overflows,
+   *  which is why the panes budget their contents in rows rather than
+   *  trusting flex to sort it out. */
+  height?: number;
   children: ReactNode;
 }) {
   return (
     <Box
       flexDirection="column"
       width={width}
+      height={height}
       borderStyle={focused ? "round" : "single"}
       borderColor={focused ? accent : theme.chrome}
       paddingX={1}
