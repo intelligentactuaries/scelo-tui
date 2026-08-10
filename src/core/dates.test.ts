@@ -80,9 +80,29 @@ describe("binPoints", () => {
     expect(rows.map((r) => r.count)).toEqual([2, 1]);
   });
 
-  test("a non-finite weight does not poison the bucket", () => {
+  test("a non-finite weight contributes 0, not 1, to a value total", () => {
+    // Once a weight column IS supplied the sum is money, not records. Adding
+    // 1 for a null value quietly printed a record count in a column labelled
+    // "<value> total" — and disagreed with the exported R, which sums with
+    // na.rm = TRUE.
     const rows = binPoints([p("2024-01-01"), p("2024-01-02")], "month", [Number.NaN, 5]);
-    expect(rows[0].sum).toBe(6); // NaN weight counts as 1, matching count semantics
+    expect(rows[0].sum).toBe(5);
+    expect(rows[0].count).toBe(2);
+  });
+
+  test("with no weights at all, sum still tracks the count", () => {
+    const rows = binPoints([p("2024-01-01"), p("2024-01-02")], "month");
+    expect(rows[0].sum).toBe(2);
+  });
+
+  test("a bucket whose values are all missing totals 0, not its row count", () => {
+    const rows = binPoints(
+      [p("2024-01-01"), p("2024-01-02"), p("2024-02-01")],
+      "month",
+      [Number.NaN, Number.NaN, 40],
+    );
+    expect(rows.map((r) => r.sum)).toEqual([0, 40]);
+    expect(rows.map((r) => r.count)).toEqual([2, 1]);
   });
 
   test("total count is preserved", () => {

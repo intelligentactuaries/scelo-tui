@@ -557,28 +557,35 @@ function levenshteinAtMost(a: string, b: string, max: number): number | null {
 // Near-duplicate categorical label detection — the classic in-data typo
 // ("Seperated" alongside "Separated"). Scans a column's top values pairwise
 // with a capped edit distance. Deliberately strict so real categories never
-// merge: case-only pairs are lowercase-categoricals' job, short codes are
+// merge: case-only pairs are lowercase-categoricals' job, short words are
 // skipped entirely (WEST/EAST sit at distance 2 but are genuinely
 // different), and both spellings must be well-populated. Returns the pair
 // affecting the most cells, recoding the rarer spelling into the more
 // common one. Exported so the column chat can ground its recode example in
 // a real pair.
-// Labels that differ only in a short standalone token ("Sector B" vs
-// "Sector D", "Zone 1" vs "Zone 2") are enumerated categories sharing a
-// prefix, not misspellings — a one-letter code swap is a different category,
-// so recode must never suggest merging them.
-function differsOnlyInCodeToken(a: string, b: string): boolean {
+
+/**
+ * The one token two labels disagree on, when they disagree on exactly one.
+ * Null when they are not token-aligned, or differ in more than one place.
+ *
+ * This is the difference between a MISSPELLING and a different category.
+ * "Eastern Cape" and "Western Cape" are 2 edits apart over 12 characters;
+ * "eastern" and "western" are 2 edits apart over 7. Same pair, and only the
+ * second number describes what actually differs — the shared "Cape" is
+ * context, and letting it pay for the edits is what merged two South
+ * African provinces into one.
+ */
+function soleDifferingToken(a: string, b: string): [string, string] | null {
   const at = a.split(/\s+/);
   const bt = b.split(/\s+/);
-  if (at.length !== bt.length) return false;
-  let diff = -1;
+  if (at.length !== bt.length) return null;
+  let found: [string, string] | null = null;
   for (let i = 0; i < at.length; i++) {
-    if (at[i] !== bt[i]) {
-      if (diff !== -1) return false; // several differing tokens → not a code swap
-      diff = i;
-    }
+    if (at[i] === bt[i]) continue;
+    if (found !== null) return null; // several differing tokens
+    found = [at[i], bt[i]];
   }
-  return diff !== -1 && at[diff].length <= 2 && bt[diff].length <= 2;
+  return found;
 }
 
 export function findNearDuplicateLabel(
@@ -597,13 +604,26 @@ export function findNearDuplicateLabel(
       const al = a.value.toLowerCase();
       const bl = b.value.toLowerCase();
       if (al === bl) continue; // case-only → lowercase-categoricals
-      const minLen = Math.min(al.length, bl.length);
+      // Budget the edits against the part that DIFFERS, not the whole
+      // label. Measuring the whole label lets shared words buy distance for
+      // the one word that changed: "Eastern Cape"/"Western Cape" cleared a
+      // 12-character budget of 2 and silently merged two provinces. Where
+      // exactly one token differs, that token sets the length — and the
+      // whole-label distance below is the same number, since identical
+      // context costs nothing to align.
+      const differing = soleDifferingToken(al, bl);
+      const [x, y] = differing ?? [al, bl];
+      const minLen = Math.min(x.length, y.length);
+      // Under four characters there is no room to tell a typo from a
+      // different value. This is also what keeps enumerated codes apart —
+      // "Sector B"/"Sector D", "Zone 1"/"Zone 2" differ in a single short
+      // token, and a one-letter code swap is a different category.
       if (minLen < 4) continue;
       // Distance budget scales with length: 1 edit for short words, 2 from
-      // 8 chars — "Seperated"→"Separated" is 1; WEST→EAST (2) is skipped.
+      // 8 chars — "Seperated"→"Separated" is 1; "eastern"/"western" (2 over
+      // 7) and WEST/EAST are skipped.
       const maxDist = minLen >= 8 ? 2 : 1;
       if (levenshteinAtMost(al, bl, maxDist) === null) continue;
-      if (differsOnlyInCodeToken(al, bl)) continue;
       const [from, to] = a.count < b.count ? [a, b] : [b, a];
       if (best === null || from.count > best.count) {
         best = { from: from.value, to: to.value, count: from.count };

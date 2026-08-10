@@ -28,15 +28,27 @@ import { chooseBin, parseDateUTC, spanDays } from "../core/dates";
 const pyStr = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const rStr = pyStr; // same escaping rules for double-quoted literals
 
-type Snippet = {
+export type Snippet = {
   /** Analysis body — assumes `df` is loaded. */
   py: string[];
   r: string[];
   /** Notebook-only plot cell (matplotlib via pandas). */
   pyPlot: string[];
+  /**
+   * The same picture in base R. Base graphics on purpose: an exported script
+   * that needs install.packages() before it draws anything is not a script
+   * that runs, and RStudio's plot pane renders base output natively. Reads
+   * only the variables the matching `r` body leaves behind.
+   */
+  rPlot?: string[];
   /** Emitted when the body uses numpy directly. */
   needsNumpy?: boolean;
 };
+
+/** One analysis the session ran, in the order it ran. The exported R restates
+ *  every one of them, so a session that switched analyses three times exports
+ *  three sections rather than only the last. */
+export type AnalysisRun = { id: string; label: string; rationale: string };
 
 /** The time bin the pane would have chosen, re-derived from the profile so
  *  the script buckets identically. */
@@ -47,13 +59,26 @@ function binFor(dc: ColumnMeta): "month" | "quarter" | "year" {
 }
 
 const PERIOD_CODE = { month: "M", quarter: "Q", year: "Y" } as const;
-const R_PERIOD: Record<"month" | "quarter" | "year", (d: string) => string[]> = {
-  month: (d) => [`period <- format(${d}, "%Y-%m")`],
-  quarter: (d) => [
-    `period <- paste0(format(${d}, "%Y"), "-Q", (as.integer(format(${d}, "%m")) + 2) %/% 3)`,
+
+/**
+ * The bucket key, as a function so it can be applied to BOTH the data and a
+ * calendar sequence — which is what gap-filling needs.
+ *
+ * Every branch guards NA explicitly. `paste0` stringifies NA into the
+ * literal "NA-QNA", which `table()` then treats as a real quarter and prints
+ * among the results; `format()` alone returns NA, which table() drops. Only
+ * the quarter branch had the bug, and quarter is what a multi-year book
+ * picks.
+ */
+const R_KEY_FN: Record<"month" | "quarter" | "year", string[]> = {
+  month: ['scelo_period <- function(x) format(x, "%Y-%m")'],
+  year: ['scelo_period <- function(x) format(x, "%Y")'],
+  quarter: [
+    "scelo_period <- function(x) ifelse(is.na(x), NA_character_,",
+    '  paste0(format(x, "%Y"), "-Q", (as.integer(format(x, "%m")) + 2) %/% 3))',
   ],
-  year: (d) => [`period <- format(${d}, "%Y")`],
 };
+const R_STEP = { month: "month", quarter: "3 months", year: "year" } as const;
 
 export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
   switch (id) {
@@ -92,6 +117,14 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           'print(summary_tbl[order(-summary_tbl$cv), c("n", "miss_pct", "mean", "sd", "cv", "min", "median", "max")])',
         ],
         pyPlot: ['df.select_dtypes("number").iloc[:, :6].hist(bins=30, figsize=(10, 6))'],
+        rPlot: [
+          "shown <- head(names(num), 6)",
+          "if (length(shown) > 0) {",
+          "  op <- par(mfrow = c(2, 3), mar = c(4, 4, 2, 1))",
+          '  for (nm in shown) hist(num[[nm]], main = nm, xlab = "", col = "grey80")',
+          "  par(op)",
+          "}",
+        ],
       };
     case "group-metric": {
       const v = valueColumn(metas);
@@ -112,6 +145,13 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           "print(seg[order(-seg$total), ])",
         ],
         pyPlot: ['seg["total"].plot(kind="bar", title=' + `${pyStr(`${v.name} by ${c.name}`)})`],
+        rPlot: [
+          "top <- head(seg[order(-seg$total), , drop = FALSE], 12)",
+          "op <- par(mar = c(9, 4, 2, 1))",
+          "barplot(top$total, names.arg = rownames(top), las = 2,",
+          `        col = "steelblue", main = ${rStr(`${v.name} by ${c.name}`)})`,
+          "par(op)",
+        ],
       };
     }
     case "frequency": {
@@ -129,6 +169,11 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           "                 row.names = names(counts)))",
         ],
         pyPlot: [`counts.plot(kind="bar", title=${pyStr(`${c.name} exposure`)})`],
+        rPlot: [
+          "op <- par(mar = c(9, 4, 2, 1))",
+          `barplot(head(counts, 12), las = 2, col = "steelblue", main = ${rStr(`${c.name} exposure`)})`,
+          "par(op)",
+        ],
       };
     }
     case "time-profile": {
@@ -151,15 +196,29 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
         ],
         r: [
           `d <- as.Date(df[[${rStr(dc.name)}]])`,
-          ...R_PERIOD[bin]("d"),
+          ...R_KEY_FN[bin],
+          // Gap-filled, like the pane: the levels come from walking the
+          // CALENDAR between the first and last date, not from the values
+          // present, so a period with no records prints an explicit zero.
+          // An invisible gap is the exact thing a missing-exposure scan
+          // exists to surface.
+          `span <- seq(min(d, na.rm = TRUE), max(d, na.rm = TRUE), by = "${R_STEP[bin]}")`,
+          "period <- factor(scelo_period(d), levels = unique(scelo_period(span)))",
           "records <- table(period)",
           ...rTotal,
           v
             ? "prof <- data.frame(records = as.vector(records), total = as.vector(total), row.names = names(records))"
             : "prof <- data.frame(records = as.vector(records), row.names = names(records))",
+          "prof[is.na(prof)] <- 0",
           "print(prof)",
         ],
         pyPlot: [`prof["records"].plot(kind="bar", title=${pyStr(`records by ${bin}`)})`],
+        rPlot: [
+          "op <- par(mar = c(9, 4, 2, 1))",
+          "barplot(prof$records, names.arg = rownames(prof), las = 2,",
+          `        col = "steelblue", main = ${rStr(`records by ${bin}`)})`,
+          "par(op)",
+        ],
       };
     }
     case "concentration": {
@@ -199,6 +258,18 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           'plt.plot([0, 1], [0, 1], "k--", label="perfect equality")',
           "plt.legend()",
         ],
+        rPlot: [
+          "# Lorenz curve — the standard picture of concentration.",
+          "if (n > 0 && total > 0) {",
+          "  cum <- c(0, cumsum(x)) / total",
+          '  plot(seq(0, 1, length.out = length(cum)), cum, type = "l", col = "steelblue",',
+          '       xlab = "share of records (smallest first)", ylab = "share of the total",',
+          `       main = ${rStr(`Lorenz curve — ${v.name}`)})`,
+          '  abline(0, 1, lty = 2, col = "grey50")',
+          `  legend("topleft", c(${rStr(v.name)}, "perfect equality"),`,
+          '         lty = c(1, 2), col = c("steelblue", "grey50"), bty = "n")',
+          "}",
+        ],
       };
     }
     case "correlation": {
@@ -229,6 +300,18 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           "plt.xticks(range(len(corr)), corr.columns, rotation=90)",
           "plt.yticks(range(len(corr)), corr.columns)",
         ],
+        rPlot: [
+          // `cm` has had its lower triangle NA-ed for the ranking above, so
+          // the heatmap recomputes rather than drawing half a matrix.
+          'cmap <- cor(num, use = "pairwise.complete.obs")',
+          "op <- par(mar = c(9, 9, 2, 1))",
+          "image(seq_len(ncol(cmap)), seq_len(ncol(cmap)), t(cmap[rev(seq_len(nrow(cmap))), ]),",
+          '      zlim = c(-1, 1), axes = FALSE, xlab = "", ylab = "", main = "correlation",',
+          '      col = hcl.colors(21, "Blue-Red"))',
+          "axis(1, seq_len(ncol(cmap)), colnames(cmap), las = 2, cex.axis = 0.7)",
+          "axis(2, seq_len(ncol(cmap)), rev(colnames(cmap)), las = 2, cex.axis = 0.7)",
+          "par(op)",
+        ],
       };
     }
     case "outliers":
@@ -238,17 +321,31 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           "q1, q3 = num.quantile(0.25), num.quantile(0.75)",
           "iqr = q3 - q1",
           "mask = (num < q1 - 1.5 * iqr) | (num > q3 + 1.5 * iqr)",
+          "# No spread, no outlier classification: with IQR 0 the fences sit",
+          "# on the quartiles and a discrete column flags half its rows.",
+          "mask.loc[:, iqr <= 0] = False",
           'print(mask.sum().sort_values(ascending=False).rename("outliers"))',
         ],
         r: [
           "num <- df[, sapply(df, is.numeric), drop = FALSE]",
           "outliers <- sapply(num, function(x) {",
           "  q <- quantile(x, c(0.25, 0.75), na.rm = TRUE); iqr <- q[2] - q[1]",
+          // No spread, no outlier classification — the same guard the pane's
+          // own boxStats makes. With IQR 0 the Tukey fences collapse onto
+          // the quartiles and a discrete count column (80% zeros) reports
+          // every other row as an outlier.
+          "  if (!is.finite(iqr) || iqr <= 0) return(0L)",
           "  sum(x < q[1] - 1.5 * iqr | x > q[2] + 1.5 * iqr, na.rm = TRUE)",
           "})",
           "print(sort(outliers, decreasing = TRUE))",
         ],
         pyPlot: ['mask.sum().sort_values(ascending=False).plot(kind="bar", title="outliers (1.5·IQR)")'],
+        rPlot: [
+          "op <- par(mar = c(9, 4, 2, 1))",
+          'barplot(head(sort(outliers, decreasing = TRUE), 12), las = 2, col = "steelblue",',
+          '        main = "outliers (1.5 x IQR)")',
+          "par(op)",
+        ],
       };
     case "missingness":
       return {
@@ -263,6 +360,14 @@ export function snippetFor(id: string, metas: ColumnMeta[]): Snippet | null {
           "print(data.frame(missing = miss, pct = round(100 * miss / nrow(df), 1)))",
         ],
         pyPlot: ['miss.plot(kind="bar", title="missing cells per column")'],
+        rPlot: [
+          "if (length(miss) > 0) {",
+          "  op <- par(mar = c(9, 4, 2, 1))",
+          '  barplot(head(miss, 12), las = 2, col = "steelblue",',
+          '          main = "missing cells per column")',
+          "  par(op)",
+          "}",
+        ],
       };
     default:
       return null;
@@ -326,23 +431,103 @@ export function buildPython(pipe: PipelineResult, now: Date, dataFile = "data.cs
   return `${out.join("\n")}\n`;
 }
 
-export function buildR(pipe: PipelineResult, now: Date, dataFile = "data.csv"): string {
-  const snip = pipe.chosen ? snippetFor(pipe.chosen.id, pipe.metas) : null;
-  const out: string[] = provenance(pipe, now, dataFile).map((l) => `# ${l}`.trimEnd());
+const R_RULE = "─".repeat(70);
+
+/** `# ── <title> ─────…` padded to a constant width, so the sections are
+ *  scannable in RStudio's editor rather than ragged. */
+function rHeading(title: string): string {
+  return `# ── ${title} ${R_RULE.slice(0, Math.max(3, 66 - title.length))}`;
+}
+
+/**
+ * The session as a script somebody can actually run.
+ *
+ * Not "the last analysis, in R": the whole arc the panes showed — what the
+ * data is, what the auto-clean did, the profile, then EVERY analysis the
+ * session ran, in order, each with its result and its plot. Base R only, so
+ * it runs in a stock RStudio with no install.packages() step; sections
+ * announce themselves with message() so a source() reads like the session
+ * did.
+ */
+export function buildR(
+  pipe: PipelineResult,
+  now: Date,
+  dataFile = "data.csv",
+  runs: AnalysisRun[] = [],
+): string {
+  // The session's runs, falling back to the pipeline's own choice — an
+  // export that never switched analyses still has exactly one section.
+  const sections =
+    runs.length > 0
+      ? runs
+      : pipe.chosen
+        ? [{ id: pipe.chosen.id, label: pipe.chosen.label, rationale: pipe.rationale }]
+        : [];
+
+  // With more than one section the header's "analysis: …/why: …" lines would
+  // name only the first — the sections carry their own titles, so drop them.
+  const head = sections.length > 1 ? { ...pipe, chosen: null } : pipe;
+  const out: string[] = provenance(head, now, dataFile).map((l) => `# ${l}`.trimEnd());
   out.push(
     "",
-    `df <- read.csv(${rStr(dataFile)}, stringsAsFactors = FALSE)`,
+    "# Base R only — no packages to install. Run the whole file (Ctrl+Shift+S",
+    "# in RStudio, or Rscript this file), or step through it section by section.",
+    "",
+    rHeading("load"),
+    // check.names=FALSE: R's default runs make.names() over the header, so
+    // `loss_ratio_%` silently becomes `loss_ratio_.` and every df[["…"]]
+    // below it returns NULL. Auto-clean does not save us — it leaves `%`,
+    // `$`, `&`, leading digits and (on a snake-case collision) spaces
+    // intact. One renamed column used to halt the whole file.
+    // na.strings: toCsv writes an empty field for a null, and R reads that
+    // as the literal "" in a character column — so missingness counts came
+    // out as zero and every frequency share was computed against a phantom
+    // blank level. pandas treats it as NaN; now both agree with the pane.
+    `df <- read.csv(${rStr(dataFile)}, stringsAsFactors = FALSE,`,
+    '               check.names = FALSE, na.strings = c("NA", ""))',
+    'message(sprintf("scelo: %d rows x %d cols loaded", nrow(df), ncol(df)))',
     "# Browse the data with RStudio's viewer:  View(df)",
     "# (Don't open the csv itself as a file — RStudio's source editor caps",
     "#  out at 5 MB; the viewer handles any size.)",
     "",
+    // The profile is the "understand" stage the TOOLS pane showed: it is
+    // what every analysis below was chosen FROM, so a script without it
+    // starts its story in the middle.
+    rHeading("profile"),
+    'message("scelo → profile")',
+    "str(df)",
+    "print(summary(df))",
+    "miss_all <- colSums(is.na(df))",
+    "if (any(miss_all > 0)) {",
+    '  cat("\\nmissing cells per column:\\n")',
+    "  print(sort(miss_all[miss_all > 0], decreasing = TRUE))",
+    "}",
+    "",
   );
-  if (snip) {
-    out.push(...snip.r);
-  } else {
-    out.push("# No analysis was chosen for this dataset — the profile is yours to explore.");
-    out.push("print(summary(df))");
+
+  if (sections.length === 0) {
+    out.push(
+      rHeading("analysis"),
+      "# No analysis was chosen for this dataset — the profile above is yours",
+      "# to explore from.",
+      "",
+    );
   }
+  sections.forEach((run, i) => {
+    const snip = snippetFor(run.id, pipe.metas);
+    out.push(
+      rHeading(`analysis ${i + 1}: ${run.label}`),
+      ...(run.rationale ? [`# why: ${run.rationale}`] : []),
+      `message(${rStr(`scelo → ${run.label}`)})`,
+      ...(snip ? snip.r : ["print(summary(df))  # no scripted form for this analysis"]),
+    );
+    if (snip?.rPlot) out.push("", ...snip.rPlot);
+    out.push("");
+  });
+
+  out.push(
+    `message(${rStr(`scelo: ${sections.length} analysis section${sections.length === 1 ? "" : "s"} above`)})`,
+  );
   return `${out.join("\n")}\n`;
 }
 

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"
+     stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" role="img"
+     aria-label="Scelo TUI">
+  <!-- One concept: a terminal with a prompt. Drawn to the single-stroke
+       recipe in website_v2/src/components/ICONOGRAPHY.md, with the stroke
+       bumped from 1.5 because a 64-unit hairline disappears at 16 px.
+       Favicon and hub-card mark; the masthead carries the wordmark lockup
+       instead (assets/tui-lockup.png). -->
+  <style>
+    :root { color: #181715; }
+    @media (prefers-color-scheme: dark) { :root { color: #F1ECDF; } }
+  </style>
+  <g stroke="currentColor">
+    <rect x="6" y="12" width="52" height="40" rx="5" />
+    <path d="M17 27l7 6-7 6" />
+    <path d="M31 39h14" />
+  </g>
+</svg>

@@ -54,8 +54,24 @@ export const theme: {
   mascot: "#d97757",
 };
 
-/** Below this the three-pane layout stops being usable — each pane gets
- *  under ~45 columns, which cannot hold a results table. The app says so
- *  rather than rendering an unreadable mess. */
-export const MIN_WIDTH = 140;
-export const MIN_HEIGHT = 24;
+// Two layouts, and each runs out of a different thing.
+//
+// Side by side is the default and the better one: three full-height panes,
+// each with its own composer and room for a table under a diagram. It needs
+// width, and below ~45 columns a pane cannot hold a results table.
+//
+// Stacked — soft above tools above hard — is what a PORTRAIT window gets,
+// where there is no width to divide but plenty of height. It reads the way
+// the pipeline runs, and it is the reason an 87x51 terminal shows a
+// workstation instead of "terminal too small".
+/** Side by side: three panes of ~45 columns, and the rows for a chat block. */
+export const WIDE_MIN_WIDTH = 140;
+export const WIDE_MIN_HEIGHT = 24;
+/** Stacked: enough width for a table row, and enough rows for three panes
+ *  to each draw a border, a title, a line of transcript and a composer. */
+export const STACK_MIN_WIDTH = 56;
+export const STACK_MIN_HEIGHT = 32;
+
+/** The narrowest window that draws anything at all — the stack's, since it
+ *  is the layout a narrow window gets. */
+export const MIN_WIDTH = STACK_MIN_WIDTH;

@@ -35,7 +35,29 @@ export type ModelResult = {
   columns: string[];
   rows: Array<Array<string | number>>;
   /** Values for a terminal plot, when the model produces a series. */
-  series?: { label: string; values: number[] };
+  series?: Series;
+};
+
+/**
+ * A plottable series, with the shape it wants to be drawn as.
+ *
+ * `kind` is declared here rather than guessed by the renderer because only
+ * the analysis knows what the numbers ARE: ten decile shares and ten monthly
+ * counts are the same array of ten numbers, and one of them is bars while
+ * the other is a curve. `labels` likewise — the pane used to infer them by
+ * matching the series length against the result table's rows, which captions
+ * a decile chart with the concentration table's "top 1%" and gets the
+ * correlation screen's pairs down to the first column's name.
+ */
+export type Series = {
+  label: string;
+  values: number[];
+  /** Horizontal bars unless the numbers say otherwise. */
+  kind?: "bars" | "columns" | "histogram" | "line";
+  /** One per value; positions with nothing useful to say hold "". */
+  labels?: string[];
+  /** Suffix on every value and tick ("%"). */
+  unit?: string;
 };
 
 // ── column heuristics ─────────────────────────────────────────────────────
@@ -132,7 +154,8 @@ export const MODELS: ModelChoice[] = [
       const profiles = profileNumericColumns(d);
       const gappy = profiles.filter((p) => p.missingPct > 0.1).length;
       const lead = profiles[0];
-      const leadBins = lead ? metas.find((m) => m.name === lead.name)?.histogramBins : undefined;
+      const leadMeta = lead ? metas.find((m) => m.name === lead.name) : undefined;
+      const leadBins = leadMeta?.histogramBins;
       return {
         headline:
           `${profiles.length} numeric column${profiles.length === 1 ? "" : "s"} described, ` +
@@ -148,7 +171,22 @@ export const MODELS: ModelChoice[] = [
           fmt(p.median),
         ]),
         series:
-          lead && leadBins ? { label: `${lead.name} distribution`, values: leadBins } : undefined,
+          lead && leadBins
+            ? {
+                label: `${lead.name} distribution`,
+                values: leadBins,
+                kind: "histogram",
+                // 12 equal-width bins between min and max (@scelo/core), so
+                // the only honest labels are the two ends of that range.
+                labels: leadBins.map((_, i) =>
+                  i === 0
+                    ? fmt(leadMeta?.min)
+                    : i === leadBins.length - 1
+                      ? fmt(leadMeta?.max)
+                      : "",
+                ),
+              }
+            : undefined,
       };
     },
   },
@@ -176,7 +214,12 @@ export const MODELS: ModelChoice[] = [
         headline: `\`${value.name}\` across \`${cat.name}\` (${levels.length} segments)`,
         columns: ["segment", "n", "mean", "total", "share"],
         rows: levels.map(([lv, g]) => [lv, g.n, fmt(g.sum / g.n), fmt(g.sum), pct(g.sum / total)]),
-        series: { label: `${value.name} total by ${cat.name}`, values: levels.map(([, g]) => g.sum) },
+        series: {
+          label: `${value.name} total by ${cat.name}`,
+          values: levels.map(([, g]) => g.sum),
+          kind: "bars",
+          labels: levels.map(([lv]) => lv),
+        },
       };
     },
   },
@@ -187,12 +230,22 @@ export const MODELS: ModelChoice[] = [
     run: (_d, metas) => {
       const cat = frequencyColumn(metas);
       const top = cat?.topValues ?? [];
-      const total = top.reduce((s, t) => s + t.count, 0) || 1;
+      // Denominate by the column's real non-null count, not by the sum of
+      // the levels shown. `topValues` is capped at 8 while the analysis
+      // admits up to 40 levels, so the old denominator inflated every share
+      // — and disagreed with the exported script, which divides by the
+      // whole table.
+      const total = cat ? cat.count - cat.missing || 1 : 1;
       return {
         headline: `Exposure across \`${cat?.name ?? "?"}\` (${cat?.unique ?? 0} levels)`,
         columns: ["level", "count", "share"],
         rows: top.map((t) => [t.value, t.count, pct(t.count / total)]),
-        series: { label: `${cat?.name ?? ""} counts`, values: top.map((t) => t.count) },
+        series: {
+          label: `${cat?.name ?? ""} counts`,
+          values: top.map((t) => t.count),
+          kind: "bars",
+          labels: top.map((t) => t.value),
+        },
       };
     },
   },
@@ -229,7 +282,14 @@ export const MODELS: ModelChoice[] = [
         headline: `\`${dc.name}\` by ${bin} — ${rows.length} periods${gaps ? `, ${gaps} empty` : ""}`,
         columns: value ? ["period", "records", `${value.name} total`] : ["period", "records"],
         rows: rows.map((r) => (value ? [r.key, r.count, fmt(r.sum)] : [r.key, r.count])),
-        series: { label: "records per period", values: rows.map((r) => r.count) },
+        // A curve, not bars: the x axis is real and ordered, and 60 monthly
+        // columns at one cell each is a line drawn with the wrong glyph.
+        series: {
+          label: "records per period",
+          values: rows.map((r) => r.count),
+          kind: "line",
+          labels: rows.map((r) => r.key),
+        },
       };
     },
   },
@@ -245,6 +305,7 @@ export const MODELS: ModelChoice[] = [
       if (!value) throw new Error("no value column"); // applies() guards
       const xs = dataset.rows.map((r) => num(r[value.name])).filter((v) => Number.isFinite(v) && v >= 0);
       const g = gini(xs);
+      const deciles = decileShares(xs);
       const shares: Array<[string, number | null]> = [
         ["top 1%", topShare(xs, 0.01)],
         ["top 5%", topShare(xs, 0.05)],
@@ -255,7 +316,16 @@ export const MODELS: ModelChoice[] = [
         headline: `\`${value.name}\` concentration — Gini ${g === null ? "—" : g.toFixed(2)}`,
         columns: ["largest…", "share of total"],
         rows: shares.map(([label, s]) => [label, s === null ? "—" : pct(s)]),
-        series: { label: "decile shares (largest first)", values: decileShares(xs) },
+        series: {
+          label: "decile shares (largest first)",
+          // Shares are fractions of the whole; a chart axis reading 0.40
+          // where the table says 40% is the same number twice in two
+          // languages.
+          values: deciles.map((s) => 100 * s),
+          kind: "columns",
+          labels: deciles.map((_, i) => `d${i + 1}`),
+          unit: "%",
+        },
       };
     },
   },
@@ -286,7 +356,12 @@ export const MODELS: ModelChoice[] = [
         headline: `${pairs.length} pairs screened${strong ? ` — ${strong} strong (|r| ≥ 0.7)` : ""}`,
         columns: ["a", "b", "r"],
         rows: top.map((p) => [p.a, p.b, `${p.r >= 0 ? "+" : ""}${p.r.toFixed(2)}`]),
-        series: { label: "|r| of top pairs", values: top.map((p) => Math.abs(p.r)) },
+        series: {
+          label: "|r| of top pairs",
+          values: top.map((p) => Math.abs(p.r)),
+          kind: "bars",
+          labels: top.map((p) => `${p.a} × ${p.b}`),
+        },
       };
     },
   },
@@ -323,7 +398,12 @@ export const MODELS: ModelChoice[] = [
           fmt(f.lo),
           fmt(f.hi),
         ]),
-        series: { label: "outlier counts", values: top.map((f) => f.count) },
+        series: {
+          label: "outlier counts",
+          values: top.map((f) => f.count),
+          kind: "bars",
+          labels: top.map((f) => f.name),
+        },
       };
     },
   },
@@ -347,6 +427,9 @@ export const MODELS: ModelChoice[] = [
         series: {
           label: "missing %",
           values: withGaps.map((m) => (100 * m.missing) / Math.max(1, m.count)),
+          kind: "bars",
+          labels: withGaps.map((m) => m.name),
+          unit: "%",
         },
       };
     },
