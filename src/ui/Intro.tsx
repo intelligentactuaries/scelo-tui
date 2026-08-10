@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { keyFor, loadConfig, maskKey, saveConfig } from "../agent/config";
 import { discoverModels, getActive, llmAvailable, reloadConfig } from "../agent/llm";
 import { PROVIDERS, type Provider, type ProviderId, type Selection } from "../agent/providers";
-import { Welcome } from "./Mascot";
+import { Welcome, markRows } from "./Mascot";
 import { Working } from "./spinner";
 import { MIN_WIDTH, theme } from "./theme";
 
@@ -287,13 +287,29 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
 
   // ── scrolling window ──────────────────────────────────────────────────────
   const saved = getActive();
-  const viewport = Math.max(6, termRows - 9);
+  // Rows the greeting may spend on its art. The biggest is 16, which is a
+  // fine share of a full-height terminal and most of a short one — so what
+  // is left after the picker's own chrome and a usable list decides which
+  // rung it gets. A hello that leaves no room for the thing it is
+  // introducing has stopped being a hello.
+  const markBudget = Math.max(4, termRows - 24);
+  const greetW = cols - 2;
+  // Everything that is not the list: this box's padding (2), the greeting's
+  // border (2) and art, the "choose a model" line with its margin (2), and
+  // the footer hint with its margin (2) — nine rows plus the mark. Counted
+  // against markRows rather than baked into a constant, because the mark's
+  // height is exactly the thing that changes. (Providers separated by a blank
+  // line still spend rows this does not count; that predates the emoji and
+  // only bites a list long enough to scroll.)
+  const viewport = Math.max(6, termRows - (markRows(greetW, markBudget) + 9));
   const start = Math.max(0, Math.min(cursor - Math.floor(viewport / 2), rows.length - viewport));
   const visible = rows.slice(Math.max(0, start), Math.max(0, start) + viewport);
 
   return (
     <Box flexDirection="column" padding={1}>
       <Welcome
+        width={greetW}
+        maxRows={markBudget}
         lines={[
           "the agentic actuarial workstation — soft data → tools → hard data",
           "pick the model that will drive it, then drop a CSV in",
@@ -391,7 +407,7 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
       {cols < MIN_WIDTH && (
         <Box marginTop={1}>
           <Text color={theme.warn}>
-            terminal is {cols} columns — the three-pane layout needs {MIN_WIDTH}. Widen it before
+            terminal is {cols} columns — the pane stack needs {MIN_WIDTH}. Widen it before
             starting.
           </Text>
         </Box>

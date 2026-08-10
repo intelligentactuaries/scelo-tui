@@ -20,7 +20,7 @@ import type { PipelineResult } from "../agent/pipeline";
 import { toCsv } from "./csv";
 import { buildNotebook } from "./notebook";
 import { buildSce, sceFilename, slugify } from "./sce";
-import { buildPython, buildR } from "./scripts";
+import { type AnalysisRun, buildPython, buildR } from "./scripts";
 import { buildWorkbook } from "./workbook";
 
 export type ExportTarget = "csv" | "py" | "ipynb" | "r" | "xlsx" | "sce";
@@ -33,10 +33,43 @@ export function parseTarget(word: string): ExportTarget | null {
   if (["csv", "data"].includes(w)) return "csv";
   if (["py", "python", "pandas"].includes(w)) return "py";
   if (["ipynb", "notebook", "jupyter"].includes(w)) return "ipynb";
-  if (["r", ".r", "rstudio"].includes(w)) return "r";
+  if (["r", ".r", "rstudio", "rscript"].includes(w)) return "r";
   if (["xlsx", "xls", "excel", "spreadsheet", "workbook"].includes(w)) return "xlsx";
   if (["sce", "scelo", "project", "ide", ".sce"].includes(w)) return "sce";
   return null;
+}
+
+/** Words that carry no format meaning, so a sentence can wrap the format the
+ *  way people actually ask: "export the whole analysis in r code". Without
+ *  this every filler word is read as a format name and the command fails on
+ *  the FIRST one — telling the user we don't know the format "the". */
+const TARGET_FILLER = new Set([
+  "a", "all", "also", "an", "and", "as", "analyses", "analysis", "code", "everything",
+  "file", "files", "for", "format", "formats", "in", "into", "me", "my", "of", "out",
+  "output", "please", "plus", "report", "results", "result", "script", "scripts",
+  "session", "the", "this", "to", "version", "whole", "work", "workings",
+]);
+
+/**
+ * The formats a phrase asks for, ignoring the words around them.
+ *
+ * Empty targets mean "everything" — the same as a bare `/export` — so
+ * "export the whole analysis" exports the lot rather than erroring on
+ * a sentence that named no format at all.
+ */
+export function parseTargets(
+  words: string[],
+): { ok: true; targets: ExportTarget[] } | { ok: false; word: string } {
+  const targets: ExportTarget[] = [];
+  for (const raw of words) {
+    // Punctuation is the user's, not a format: "excel, r" is two formats.
+    const w = raw.trim().toLowerCase().replace(/[^a-z0-9.]/g, "");
+    if (w === "" || TARGET_FILLER.has(w)) continue;
+    const t = parseTarget(w);
+    if (!t) return { ok: false, word: raw };
+    if (!targets.includes(t)) targets.push(t);
+  }
+  return { ok: true, targets };
 }
 
 export type ExportOutcome = {
@@ -62,6 +95,9 @@ export function exportArtifacts(
     layout?: "dir" | "flat";
     /** Flat layout's destination. Ignored for "dir". */
     dir?: string;
+    /** Every analysis the session ran, in order. The R script restates all
+     *  of them; empty falls back to the pipeline's own chosen analysis. */
+    runs?: AnalysisRun[];
   } = {},
 ): ExportOutcome {
   const now = opts.now ?? new Date();
@@ -90,7 +126,7 @@ export function exportArtifacts(
   if (targets.includes("csv") || wantsScript) write(dataFile, toCsv(pipe.dataset));
   if (targets.includes("py")) write(name("analysis.py"), buildPython(pipe, now, dataFile));
   if (targets.includes("ipynb")) write(name("analysis.ipynb"), buildNotebook(pipe, now, dataFile));
-  if (targets.includes("r")) write(name("analysis.R"), buildR(pipe, now, dataFile));
+  if (targets.includes("r")) write(name("analysis.R"), buildR(pipe, now, dataFile, opts.runs));
   if (targets.includes("xlsx")) write(`${stem}.xlsx`, buildWorkbook(pipe, now));
   if (targets.includes("sce")) write(sceFilename(pipe.dataset.name), buildSce(pipe, now));
 

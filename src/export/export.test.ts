@@ -15,7 +15,7 @@ import { type Dataset, summariseDataset } from "@scelo/core";
 import { MODELS, MODEL_BY_ID } from "../agent/analyses";
 import type { PipelineResult } from "../agent/pipeline";
 import { toCsv } from "./csv";
-import { ALL_TARGETS, exportArtifacts, parseTarget } from "./index";
+import { ALL_TARGETS, exportArtifacts, parseTarget, parseTargets } from "./index";
 import { buildNotebook } from "./notebook";
 import { buildSce, sceFilename } from "./sce";
 import { buildPython, buildR, coveredAnalyses } from "./scripts";
@@ -232,17 +232,57 @@ describe("scripts", () => {
 
   test("R restates the same analysis in base R", () => {
     const src = buildR(pipeFor("group-metric"), NOW);
-    expect(src).toContain('read.csv("data.csv", stringsAsFactors = FALSE)');
+    expect(src).toContain('read.csv("data.csv"');
     expect(src).toContain('tapply(df[["premium"]], df[["region"]]');
     expect(src.split("\n").every((l) => !l.includes("undefined"))).toBe(true);
   });
 
-  test("the time-profile script buckets by the pane's own bin", () => {
+  test("read.csv is told not to rename columns or invent empty strings", () => {
+    // R's defaults break the script two ways: make.names() rewrites any
+    // non-syntactic header (`loss_ratio_%` → `loss_ratio_.`) so every
+    // df[["…"]] returns NULL and the file halts; and an empty field stays
+    // the literal "" in a character column, so missingness reads as zero
+    // and frequency shares gain a phantom blank level.
+    const src = buildR(pipeFor("group-metric"), NOW);
+    expect(src).toContain("check.names = FALSE");
+    expect(src).toContain('na.strings = c("NA", "")');
+  });
+
+  test("the time-profile script buckets by the pane's own bin, gap-filled", () => {
     // Six months of data → month bin → pandas "M" period.
     const src = buildPython(pipeFor("time-profile"), NOW);
     expect(src).toContain('d.dt.to_period("M")');
     const r = buildR(pipeFor("time-profile"), NOW);
-    expect(r).toContain('format(d, "%Y-%m")');
+    expect(r).toContain('format(x, "%Y-%m")');
+    // Levels come from walking the calendar, so an empty period prints a
+    // zero row the way the pane's binPoints does.
+    expect(r).toContain('by = "month"');
+    expect(r).toContain("levels = unique(scelo_period(span))");
+  });
+
+  test("the quarter binner guards NA instead of fabricating an NA-QNA bucket", () => {
+    // paste0 stringifies NA into the literal "NA-QNA", which table() then
+    // reports as a real quarter alongside the genuine ones. Needs a span
+    // wide enough that the pane picks quarter rather than month.
+    const dataset = fixture();
+    const spread: Dataset = {
+      ...dataset,
+      rows: dataset.rows.map((r, i) => ({
+        ...r,
+        start_date: `20${20 + (i % 5)}-${String((i % 12) + 1).padStart(2, "0")}-15`,
+      })),
+    };
+    const metas = summariseDataset(spread);
+    const pipe: PipelineResult = {
+      ...pipeFor("time-profile"),
+      dataset: spread,
+      metas,
+      chosen: MODEL_BY_ID.get("time-profile") ?? null,
+    };
+    const r = buildR(pipe, NOW);
+    expect(r).toContain("-Q");
+    expect(r).toContain("ifelse(is.na(x), NA_character_,");
+    expect(r).toContain('by = "3 months"');
   });
 
   test("every generated python parses; every script names its data file", () => {
@@ -354,6 +394,23 @@ describe("exportArtifacts", () => {
     expect(ALL_TARGETS).toHaveLength(6);
   });
 
+  test("a sentence around the format still names the format", () => {
+    // The failure this replaces: every word was read as a format, so
+    // "export the whole analysis in r code" died on `the`.
+    const t = (s: string) => {
+      const r = parseTargets(s.split(/\s+/));
+      return r.ok ? r.targets : `error:${r.word}`;
+    };
+    expect(t("the whole analysis in r code")).toEqual(["r"]);
+    expect(t("analysis in r code")).toEqual(["r"]);
+    expect(t("my results as an excel file please")).toEqual(["xlsx"]);
+    expect(t("excel, r")).toEqual(["xlsx", "r"]);
+    // Naming no format at all means everything, same as a bare /export.
+    expect(t("the whole analysis")).toEqual([]);
+    // A word that IS trying to be a format and isn't one still reports.
+    expect(t("as pdf")).toBe("error:pdf");
+  });
+
   test("flat layout prefixes names and the scripts follow", () => {
     // Flat mode drops files into somebody's OPEN PROJECT — generic names
     // like data.csv are a collision waiting to happen there, and a script
@@ -383,5 +440,57 @@ describe("exportArtifacts", () => {
     expect(r).toContain('read.csv("book_data.csv"');
     const nb = readFileSync(join(dir, "book_analysis.ipynb"), "utf8");
     expect(nb).toContain("book_data.csv");
+  });
+});
+
+describe("the exported R runs the whole session", () => {
+  test("every analysis the session ran becomes its own section", () => {
+    const pipe = pipeFor("group-metric");
+    const r = buildR(pipe, NOW, "data.csv", [
+      { id: "missingness", label: "Missingness", rationale: "first look" },
+      { id: "group-metric", label: "Value by segment", rationale: "switched by you" },
+    ]);
+    expect(r).toContain("analysis 1: Missingness");
+    expect(r).toContain("analysis 2: Value by segment");
+    expect(r).toContain("# why: first look");
+    // …and the header's single-analysis lines are gone, since they would
+    // name only the first of the two.
+    expect(r).not.toContain("\n# analysis: ");
+  });
+
+  test("the profile stage is in the script, not just the chosen analysis", () => {
+    const r = buildR(pipeFor("group-metric"), NOW, "data.csv");
+    expect(r).toContain("str(df)");
+    expect(r).toContain("print(summary(df))");
+    expect(r).toContain("miss_all <- colSums(is.na(df))");
+  });
+
+  test("no analysis at all still yields a runnable profile script", () => {
+    const bare = { ...pipeFor("group-metric"), chosen: null, result: null };
+    const r = buildR(bare, NOW, "data.csv");
+    expect(r).toContain("read.csv(\"data.csv\"");
+    expect(r).toContain("str(df)");
+  });
+
+  test("base R only — an export that needs install.packages() is not runnable", () => {
+    const r = buildR(pipeFor("group-metric"), NOW, "data.csv", [
+      { id: "concentration", label: "Concentration", rationale: "" },
+      { id: "correlation", label: "Correlation", rationale: "" },
+      { id: "numeric-summary", label: "Descriptive summary", rationale: "" },
+    ]);
+    expect(r).not.toMatch(/library\(|require\(|install\.packages\(/);
+    // Each section brought its own base-graphics picture.
+    expect(r).toContain("Lorenz curve");
+    expect(r).toContain("image(");
+    expect(r).toContain("hist(");
+  });
+
+  test("every analysis in the menu exports a plot as well as a table", () => {
+    // A section that prints numbers but draws nothing is half an export —
+    // and the pane the user is reading from always has a picture.
+    for (const m of MODELS) {
+      const r = buildR(pipeFor(m.id), NOW, "data.csv");
+      expect(r).toMatch(/barplot\(|hist\(|image\(|plot\(/);
+    }
   });
 });

@@ -23,13 +23,18 @@ export type Command = {
 };
 
 export const COMMANDS: Command[] = [
+  { name: "files", args: "[folder]", hint: "pick a data file to load — no dragging needed", standalone: true },
   { name: "example", args: "[number|name]", hint: "load a bundled sample dataset", standalone: true },
   { name: "export", args: "[format…]", hint: "write artifacts for every tool", standalone: true },
   { name: "live", args: "[off]", hint: "mirror the session into RStudio/Jupyter files as it runs", standalone: true },
   { name: "open", args: "[format]", hint: "open an exported artifact", standalone: true },
   { name: "list", hint: "the analyses that apply to this data", standalone: true },
+  { name: "charts", args: "[number]", hint: "every plot this data makes, full screen", standalone: true },
   { name: "run", args: "<analysis|number>", hint: "switch the analysis", standalone: false },
   { name: "show", args: "<column>", hint: "one column's profile", standalone: false },
+  { name: "graph", args: "[on|off]", hint: "the node/edge diagrams in tools and output", standalone: true },
+  { name: "copy", args: "[table|reading|reply]", hint: "put values on the clipboard, no dragging", standalone: true },
+  { name: "mouse", args: "[on|off]", hint: "click-to-focus, at the cost of plain drag-select", standalone: true },
   { name: "help", hint: "everything you can type", standalone: true },
 ];
 
@@ -67,6 +72,12 @@ export function helpText(): string {
     }),
     "",
     "type / for the menu · ⏎ send · ctrl-e export · ctrl-o model",
+    "↑↓ prompt history · ←→ move in the line · esc clear it",
+    "ctrl-a start · ctrl-k/u kill to end/start · ctrl-w kill a word",
+    "copying: drag to select and copy, as in any other window — clicks are off",
+    "  by default so that keeps working. /copy puts the real values on the",
+    "  clipboard instead, with no borders or padding caught in them.",
+    "  /mouse on adds click-to-focus; selecting then needs shift held.",
     "a bare number answers whichever menu was just printed",
     "anything else goes to the model",
   ].join("\n");
