@@ -254,3 +254,203 @@
     font-size: 0.66rem;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   The terminal screen — the landing-page hero
+
+   Same capture as the plain code block this replaces: every character below
+   is one the program printed, cut on its own pane boundaries into three
+   self-contained boxes (47 + 47 + 48 cells) by tools/render_screen.py. What
+   changed is only the presentation.
+
+   Three things were wrong with it as a code block. It was 142 columns inside
+   a 37rem content column, so it scrolled sideways on every screen there is.
+   Shrinking it to fit meant nine-pixel type. And it was one flat grey, so
+   nothing in it read as more important than anything else.
+
+   The fixes, in order: the page hides both sidebars and the figure is centred
+   on the viewport, which roughly doubles the room; the type is sized in
+   container-query units so the 142 columns are always exactly as wide as the
+   frame they are in; and the glyphs carry classes so state has colour.
+
+   Colour is the one deviation and it is stated in the figcaption: the
+   terminal renders ANSI, and the panes are tinted here to the site palette —
+   soft blue, tools green, hard violet — so this agrees with the demo on the
+   marketing site about what each stage looks like.
+
+   Nothing inside a pane may change a glyph's advance width: no letter
+   spacing, no font stretching. The alignment is the drawing.
+   --------------------------------------------------------------------------- */
+
+.md-typeset figure.tui-screen {
+  display: block;
+  width: 100%;
+  margin: 1rem 0 1.8rem;
+  /* Material centres figure text. A terminal is flush left, and a centred
+     <pre> puts the drawing in the middle of its own box the moment the box is
+     wider than the drawing — which is exactly what happens once the panes
+     stack. */
+  text-align: left;
+}
+
+/* Only a page that has hidden both sidebars (`hide: [navigation, toc]`) has
+   room either side to grow into. Material keeps the two sidebars in the DOM
+   and marks them `hidden`, so that is what this asks about. Anywhere else the
+   figure stays inside the content column, where the container query below
+   simply gives it smaller type. */
+.md-main__inner:has(> .md-sidebar--primary[hidden]):has(> .md-sidebar--secondary[hidden]) .tui-screen {
+  width: min(78rem, calc(100vw - 4rem));
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+
+.tui-screen__frame {
+  container-type: inline-size;
+  padding: 0.85rem 0.9rem 0.7rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 10px;
+  background-color: var(--ia-bg-1);
+}
+
+.tui-screen__panes {
+  display: grid;
+  grid-template-columns: max-content max-content max-content;
+  justify-content: center;
+  align-items: start;
+}
+
+/* 142 cells at the 0.6em advance of JetBrains Mono is 85.2em wide, so a cell
+   is 100cqw / 85.2 = 1.17cqw of the frame. 1.14 leaves slack for a fallback
+   font with a wider cell; the cap stops the screen growing past comfortable
+   reading size on a very wide window. */
+.md-typeset .tui-pane {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--md-default-fg-color);
+  font-family: var(--md-code-font-family, "JetBrains Mono", monospace);
+  font-size: min(1.14cqw, 0.9rem);
+  /* Exactly 1: a terminal cell is one em tall, and the box-drawing glyphs are
+     cut to fill it. Any leading at all and every vertical rule in the drawing
+     breaks into a dashed line. */
+  line-height: 1;
+  white-space: pre;
+  overflow: visible;
+}
+
+/* Below this the three-across type would drop under ten pixels, so the panes
+   stack instead. Each one still carries its own drawn frame, so stacking
+   costs nothing but the side-by-side reading. */
+@container (max-width: 52rem) {
+  .tui-screen__panes {
+    grid-template-columns: max-content;
+    justify-content: start;
+    gap: 0.5rem;
+  }
+
+  /* 48 cells is the widest pane, so 100cqw / (48 x 0.6) = 3.47cqw fills the
+     frame exactly; 3.35 keeps a margin. The cap stops a tablet-width screen
+     rendering a terminal in headline type. */
+  .md-typeset .tui-pane {
+    font-size: min(3.35cqw, 0.9rem);
+    overflow-x: auto;
+  }
+}
+
+/* ---- what the glyphs mean ---- */
+
+.tui-pane--soft {
+  --tui-accent: var(--ia-accent2);
+}
+.tui-pane--tools {
+  --tui-accent: var(--ia-primary);
+}
+.tui-pane--hard {
+  --tui-accent: var(--ia-accent3);
+}
+
+/* Frame furniture and clause separators: scaffolding, so it recedes. */
+.tui-pane .f,
+.tui-pane .dim {
+  color: var(--ia-fg-dim);
+}
+
+/* The program's own section headings inside a pane. */
+.tui-pane .lbl {
+  color: var(--ia-fg-mute);
+  font-weight: 700;
+}
+
+/* Backticked column names — the nouns the analysis is about. */
+.tui-pane .id {
+  color: var(--md-default-fg-color);
+}
+
+/* A finished pipeline stage is green wherever it appears, because green is
+   what "done" means everywhere else in this palette. */
+.tui-pane .ok {
+  color: var(--ia-primary);
+}
+
+/* Slash commands are actions rather than prose. */
+.tui-pane .cmd {
+  color: var(--ia-warn);
+}
+
+.tui-pane .title {
+  color: var(--tui-accent);
+  font-weight: 700;
+}
+
+.tui-pane .focus,
+.tui-pane .prompt,
+.tui-pane .bar,
+.tui-pane .on,
+.tui-pane .cur {
+  color: var(--tui-accent);
+}
+
+.tui-pane .focus {
+  opacity: 0.8;
+}
+
+.tui-pane .cur {
+  animation: tui-blink 1.1s steps(1, end) infinite;
+}
+
+@keyframes tui-blink {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  56%,
+  100% {
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tui-pane .cur {
+    animation: none;
+  }
+}
+
+/* The key hints are one 147-character line in the terminal. Here they are
+   prose and allowed to wrap, which is what kept the old block scrolling. */
+.md-typeset .tui-screen__keys {
+  margin: 0.6rem 0 0;
+  color: var(--ia-fg-dim);
+  font-family: var(--md-code-font-family, "JetBrains Mono", monospace);
+  font-size: 0.62rem;
+  line-height: 1.55;
+}
+
+.md-typeset .tui-screen figcaption {
+  max-width: none;
+  margin: 0.6rem 0 0;
+  color: var(--md-default-fg-color--lighter);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  text-align: left;
+}

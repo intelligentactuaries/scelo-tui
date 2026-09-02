@@ -1,3 +1,12 @@
+---
+# The hero is the program's own 142-column screen. Both sidebars are hidden so
+# that it has the width to be legible; the section tabs in the masthead still
+# carry the navigation. See `.tui-screen` in stylesheets/extra.css.
+hide:
+  - navigation
+  - toc
+---
+
 # Scelo TUI { .sr-only }
 
 <figure class="tui-banner" markdown="0">
@@ -21,40 +30,113 @@ Jupyter, R, Excel and the Scelo IDE in one command.
 The whole product is one screen. Left is the data, middle is what the agent
 decided, right is the result. Each pane has its own chat box at the bottom.
 
-```text
-╭─────────────────────────────────────────────╮┌─────────────────────────────────────────────┐┌──────────────────────────────────────────────┐
-│ SOFT · data ◂ focus                         ││ TOOLS · models                              ││ HARD · output                                │
-│                                             ││                                             ││                                              │
-│ file(s)                                     ││ pipeline                                    ││ table                                        │
-│ └ book.csv                                  ││ ✓ read file · 900 rows x 8 cols             ││ `sum_insured` across `line` (5 segments)     │
-│   900 rows × 7 cols                         ││ ✓ auto-clean · 1 step over 1 pass           ││                                              │
-│                                             ││ ✓ understand                                ││ segment     n   mean    total  share         │
-│ summary                                     ││ ✓ choose analysis · Value by segment        ││ Motor       185 470,270 87.00M 21.7%         │
-│ cleaned: 1 steps / 1 passes                 ││ ✓ run · `sum_insured` across `line` (5      ││ Marine      184 455,146 83.75M 20.9%         │
-│ dropped: notes                              ││ segments)                                   ││ Liability   190 434,773 82.61M 20.6%         │
-│                                             ││                                             ││ Property    178 419,112 74.60M 18.6%         │
-│ Rows represent one policy.                  ││ analyses                                    ││ Engineering 163 443,220 72.24M 18.1%         │
-│ Key analytical columns:                     ││ ╔═════════════════════════╗                 ││                                              │
-│ - `inception`: Policy start date.           ││ ║ ▓ book.csv              ║                 ││ plot                                         │
-│ - `sum_insured` and `premium`: Financial    ││ ║ 900 × 7 · 1 clean steps ║                 ││ sum_insured total by line · /charts          │
-│ details of policies.                        ││ ╚═════════════════════════╝                 ││ Motor       ███████████████████████ 87.0M    │
-│ Potential issues:                           ││    │                                        ││ Marine      ██████████████████████ 83.7M     │
-│ - `claims_paid` has many missing values,    ││    │  ┌────────────────────────────────┐    ││ Liability   ██████████████████████ 82.6M     │
-│ which may limit analysis.                   ││    ├─▶│ ● Value by segment             │    ││ Property    ████████████████████ 74.6M       │
-│                                             ││    │  └────────────────────────────────┘    ││ Engineering ███████████████████ 72.2M        │
-│ ─────────────────────────────────────────── ││    │  ┌────────────────────────────────┐    ││                                              │
-│ ask to change what the agent decided…       ││    ├┄▶│ · Descriptive summary          │    ││ flow                                         │
-│                                             ││    │  └────────────────────────────────┘    ││ ┌────────────────────┐                       │
-│                                             ││    └┄▶ +5 more · /list                      ││ │ ● Value by segment │─┐                     │
-│                                             ││ To understand the distribution of premiums  ││ └────────────────────┘ │                     │
-│                                             ││ and claims paid by policy line and region.  ││   ┌────────────────────┘                     │
-│                                             ││ /run to change · /list for the menu         ││   ▼                                          │
-│ ╭─────────────────────────────────────────╮ ││ ╭─────────────────────────────────────────╮ ││ ╭──────────────────────────────────────────╮ │
-│ │ › ▌                                     │ ││ │ › …                                     │ ││ │ › …                                      │ │
-│ ╰─────────────────────────────────────────╯ ││ ╰─────────────────────────────────────────╯ ││ ╰──────────────────────────────────────────╯ │
-╰─────────────────────────────────────────────╯└─────────────────────────────────────────────┘└──────────────────────────────────────────────┘
-tab pane · drag to select+copy · ⏎ send (or paste a path) · ↑↓ history · /copy values · /help commands · ctrl-e export · ctrl-o model · ctrl-c quit
-```
+<!-- BEGIN tui-screen (generated by tools/render_screen.py) -->
+<figure class="tui-screen" markdown="0">
+  <div class="tui-screen__frame">
+    <div class="tui-screen__panes" role="img" aria-label="The Scelo TUI screen: three panes side by side. Left, SOFT · data — book.csv at 900 rows by 7 columns after cleaning, and the agent&#x27;s reading of what the columns mean. Middle, TOOLS · models — the five pipeline stages, all complete, and the chosen analysis &#x27;Value by segment&#x27; with the runners-up beneath it. Right, HARD · output — sum_insured across line for five segments, as a table and as a bar chart, Motor highest at 87.0M. Each pane has its own chat box at the bottom.">
+<pre class="tui-pane tui-pane--soft"><span class="f">╭─────────────────────────────────────────────╮</span>
+<span class="f">│</span> <span class="title">SOFT · data</span> <span class="focus">◂ focus</span>                         <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">file(s)</span>                                     <span class="f">│</span>
+<span class="f">│</span> <span class="f">└</span> book.csv                                  <span class="f">│</span>
+<span class="f">│</span>   900 rows × 7 cols                         <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">summary</span>                                     <span class="f">│</span>
+<span class="f">│</span> cleaned: 1 steps / 1 passes                 <span class="f">│</span>
+<span class="f">│</span> dropped: notes                              <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> Rows represent one policy.                  <span class="f">│</span>
+<span class="f">│</span> Key analytical columns:                     <span class="f">│</span>
+<span class="f">│</span> - <span class="id">`inception`</span>: Policy start date.           <span class="f">│</span>
+<span class="f">│</span> - <span class="id">`sum_insured`</span> and <span class="id">`premium`</span>: Financial    <span class="f">│</span>
+<span class="f">│</span> details of policies.                        <span class="f">│</span>
+<span class="f">│</span> Potential issues:                           <span class="f">│</span>
+<span class="f">│</span> - <span class="id">`claims_paid`</span> has many missing values,    <span class="f">│</span>
+<span class="f">│</span> which may limit analysis.                   <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> <span class="f">───────────────────────────────────────────</span> <span class="f">│</span>
+<span class="f">│</span> ask to change what the agent decided<span class="dim">…</span>       <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> <span class="f">╭─────────────────────────────────────────╮</span> <span class="f">│</span>
+<span class="f">│</span> <span class="f">│</span> <span class="prompt">›</span> <span class="cur">▌</span>                                     <span class="f">│</span> <span class="f">│</span>
+<span class="f">│</span> <span class="f">╰─────────────────────────────────────────╯</span> <span class="f">│</span>
+<span class="f">╰─────────────────────────────────────────────╯</span></pre>
+<pre class="tui-pane tui-pane--tools"><span class="f">┌─────────────────────────────────────────────┐</span>
+<span class="f">│</span> <span class="title">TOOLS · models</span>                              <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">pipeline</span>                                    <span class="f">│</span>
+<span class="f">│</span> <span class="ok">✓</span> read file <span class="dim">·</span> 900 rows x 8 cols             <span class="f">│</span>
+<span class="f">│</span> <span class="ok">✓</span> auto-clean <span class="dim">·</span> 1 step over 1 pass           <span class="f">│</span>
+<span class="f">│</span> <span class="ok">✓</span> understand                                <span class="f">│</span>
+<span class="f">│</span> <span class="ok">✓</span> choose analysis <span class="dim">·</span> Value by segment        <span class="f">│</span>
+<span class="f">│</span> <span class="ok">✓</span> run <span class="dim">·</span> <span class="id">`sum_insured`</span> across <span class="id">`line`</span> (5      <span class="f">│</span>
+<span class="f">│</span> segments)                                   <span class="f">│</span>
+<span class="f">│</span>                                             <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">analyses</span>                                    <span class="f">│</span>
+<span class="f">│</span> <span class="f">╔═════════════════════════╗</span>                 <span class="f">│</span>
+<span class="f">│</span> <span class="f">║</span> <span class="bar">▓</span> book.csv              <span class="f">║</span>                 <span class="f">│</span>
+<span class="f">│</span> <span class="f">║</span> 900 × 7 <span class="dim">·</span> 1 clean steps <span class="f">║</span>                 <span class="f">│</span>
+<span class="f">│</span> <span class="f">╚═════════════════════════╝</span>                 <span class="f">│</span>
+<span class="f">│</span>    <span class="f">│</span>                                        <span class="f">│</span>
+<span class="f">│</span>    <span class="f">│</span>  <span class="f">┌────────────────────────────────┐</span>    <span class="f">│</span>
+<span class="f">│</span>    <span class="f">├─▶│</span> <span class="on">●</span> Value by segment             <span class="f">│</span>    <span class="f">│</span>
+<span class="f">│</span>    <span class="f">│</span>  <span class="f">└────────────────────────────────┘</span>    <span class="f">│</span>
+<span class="f">│</span>    <span class="f">│</span>  <span class="f">┌────────────────────────────────┐</span>    <span class="f">│</span>
+<span class="f">│</span>    <span class="f">├┄▶│</span> <span class="dim">·</span> Descriptive summary          <span class="f">│</span>    <span class="f">│</span>
+<span class="f">│</span>    <span class="f">│</span>  <span class="f">└────────────────────────────────┘</span>    <span class="f">│</span>
+<span class="f">│</span>    <span class="f">└┄▶</span> +5 more <span class="dim">·</span> <span class="cmd">/list</span>                      <span class="f">│</span>
+<span class="f">│</span> To understand the distribution of premiums  <span class="f">│</span>
+<span class="f">│</span> and claims paid by policy line and region.  <span class="f">│</span>
+<span class="f">│</span> <span class="cmd">/run</span> to change <span class="dim">·</span> <span class="cmd">/list</span> for the menu         <span class="f">│</span>
+<span class="f">│</span> <span class="f">╭─────────────────────────────────────────╮</span> <span class="f">│</span>
+<span class="f">│</span> <span class="f">│</span> <span class="prompt">›</span> <span class="dim">…</span>                                     <span class="f">│</span> <span class="f">│</span>
+<span class="f">│</span> <span class="f">╰─────────────────────────────────────────╯</span> <span class="f">│</span>
+<span class="f">└─────────────────────────────────────────────┘</span></pre>
+<pre class="tui-pane tui-pane--hard"><span class="f">┌──────────────────────────────────────────────┐</span>
+<span class="f">│</span> <span class="title">HARD · output</span>                                <span class="f">│</span>
+<span class="f">│</span>                                              <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">table</span>                                        <span class="f">│</span>
+<span class="f">│</span> <span class="id">`sum_insured`</span> across <span class="id">`line`</span> (5 segments)     <span class="f">│</span>
+<span class="f">│</span>                                              <span class="f">│</span>
+<span class="f">│</span> segment     n   mean    total  share         <span class="f">│</span>
+<span class="f">│</span> Motor       185 470,270 87.00M 21.7%         <span class="f">│</span>
+<span class="f">│</span> Marine      184 455,146 83.75M 20.9%         <span class="f">│</span>
+<span class="f">│</span> Liability   190 434,773 82.61M 20.6%         <span class="f">│</span>
+<span class="f">│</span> Property    178 419,112 74.60M 18.6%         <span class="f">│</span>
+<span class="f">│</span> Engineering 163 443,220 72.24M 18.1%         <span class="f">│</span>
+<span class="f">│</span>                                              <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">plot</span>                                         <span class="f">│</span>
+<span class="f">│</span> sum_insured total by line <span class="dim">·</span> <span class="cmd">/charts</span>          <span class="f">│</span>
+<span class="f">│</span> Motor       <span class="bar">███████████████████████</span> 87.0M    <span class="f">│</span>
+<span class="f">│</span> Marine      <span class="bar">██████████████████████</span> 83.7M     <span class="f">│</span>
+<span class="f">│</span> Liability   <span class="bar">██████████████████████</span> 82.6M     <span class="f">│</span>
+<span class="f">│</span> Property    <span class="bar">████████████████████</span> 74.6M       <span class="f">│</span>
+<span class="f">│</span> Engineering <span class="bar">███████████████████</span> 72.2M        <span class="f">│</span>
+<span class="f">│</span>                                              <span class="f">│</span>
+<span class="f">│</span> <span class="lbl">flow</span>                                         <span class="f">│</span>
+<span class="f">│</span> <span class="f">┌────────────────────┐</span>                       <span class="f">│</span>
+<span class="f">│</span> <span class="f">│</span> <span class="on">●</span> Value by segment <span class="f">│─┐</span>                     <span class="f">│</span>
+<span class="f">│</span> <span class="f">└────────────────────┘</span> <span class="f">│</span>                     <span class="f">│</span>
+<span class="f">│</span>   <span class="f">┌────────────────────┘</span>                     <span class="f">│</span>
+<span class="f">│</span>   <span class="f">▼</span>                                          <span class="f">│</span>
+<span class="f">│</span> <span class="f">╭──────────────────────────────────────────╮</span> <span class="f">│</span>
+<span class="f">│</span> <span class="f">│</span> <span class="prompt">›</span> <span class="dim">…</span>                                      <span class="f">│</span> <span class="f">│</span>
+<span class="f">│</span> <span class="f">╰──────────────────────────────────────────╯</span> <span class="f">│</span>
+<span class="f">└──────────────────────────────────────────────┘</span></pre>
+    </div>
+    <p class="tui-screen__keys">tab pane · drag to select+copy · ⏎ send (or paste a path) · ↑↓ history · /copy values · /help commands · ctrl-e export · ctrl-o model · ctrl-c quit</p>
+  </div>
+  <figcaption>
+    Colour is the one thing here that is ours. The terminal draws this in
+    ANSI; the panes are tinted to the site palette so that this screen and
+    the demo on the marketing site agree about what each stage looks like.
+  </figcaption>
+</figure>
+<!-- END tui-screen -->
 
 Every screen on this site is a real capture of the running program, not a
 mock-up.
