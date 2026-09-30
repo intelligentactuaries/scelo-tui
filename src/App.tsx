@@ -5,10 +5,33 @@
 // what the agent already decided.
 
 import { basename, relative } from "node:path";
-import { SAMPLES, SAMPLE_BY_KEY, type ColumnMeta, type SampleKey, type SampleSpec } from "@scelo/core";
+import {
+  type ActuarialTableSpec,
+  SAMPLES,
+  SAMPLE_BY_KEY,
+  type ColumnMeta,
+  type SampleKey,
+  type SampleSpec,
+} from "@scelo/core";
 import { Box, Text, useApp, useInput, usePaste } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MODELS, resolveChoice } from "./agent/analyses";
+import { MODELS, type ModelResult, notApplicableText, resolveRun } from "./agent/analyses";
+import {
+  type SessionTable,
+  type TableOrigin,
+  buildFailedLine,
+  buildTable,
+  builtLine,
+  extractTableSpec,
+  isSuggestRequest,
+  keepTable,
+  noSuggestionsLine,
+  parseRequest,
+  shortLabel,
+  suggestTables,
+  tableAsResult,
+  tableProtocol,
+} from "./agent/tables";
 import { activeLabel, llmAvailable } from "./agent/llm";
 import {
   type PipelinePartial,
@@ -162,6 +185,9 @@ export function App({
   focusRef.current = focus;
   const [stages, setStages] = useState<Partial<Record<StageId, StageEvent>>>({});
   const [pipe, setPipe] = useState<PipelineResult | null>(null);
+  /** The same fact as `pipe`, for closures that outlive their render. */
+  const pipeRef = useRef<PipelineResult | null>(null);
+  pipeRef.current = pipe;
   const [running, setRunning] = useState(false);
   /** The same fact as `running`, readable from closures that outlive the
    *  render they were built in — see `start`. */
@@ -185,6 +211,18 @@ export function App({
    *  line toggles it; the plot and the flow diagram stand down while it is
    *  open, because the rows have to come from somewhere. */
   const [tableOpen, setTableOpen] = useState(false);
+  /** Actuarial tables built this session (the IDE's workspace tables), and
+   *  which one — if any — the HARD pane is showing in place of the analysis
+   *  result. A table is a deliverable of its own, not an analysis run, so it
+   *  sits beside the result rather than replacing it: /run brings the
+   *  analysis back. */
+  const [tables, setTables] = useState<SessionTable[]>([]);
+  const [shownTableId, setShownTableId] = useState<string | null>(null);
+  /** Refs of the same, for closures a picker stores (see `start`). */
+  const tablesRef = useRef<SessionTable[]>([]);
+  tablesRef.current = tables;
+  const shownTableRef = useRef<SessionTable | null>(null);
+  shownTableRef.current = shownTableId ? (tables.find((t) => t.id === shownTableId) ?? null) : null;
   const started = useRef(false);
 
   // ── which way the panes go ──────────────────────────────────────────────
@@ -348,6 +386,10 @@ export function App({
       // cannot render and a keyboard that cannot leave it.
       setCharts(null);
       setTableOpen(false);
+      // Back to the analysis view. Tables already built stay on the shelf —
+      // a parametric life table does not stop being true because a new
+      // file arrived — and /tables still lists them.
+      setShownTableId(null);
       // A fresh dataset starts a fresh live story — the mirror's run list
       // must not carry sections from the previous file.
       liveRuns.current = [];
@@ -423,7 +465,12 @@ export function App({
           const plan = planFor(host);
           // The session's runs, so the R script restates every analysis that
           // was actually performed rather than only the one still on screen.
-          const outcome = exportArtifacts(pipe, { targets, runs: liveRuns.current, ...plan });
+          const outcome = exportArtifacts(pipe, {
+            targets,
+            runs: liveRuns.current,
+            tables: tablesRef.current,
+            ...plan,
+          });
           lastExport.current = outcome;
           const rel = relative(process.cwd(), outcome.dir);
           const where =
@@ -524,6 +571,7 @@ export function App({
           const result = model.run(pipe.dataset, pipe.metas);
           const next = { ...pipe, chosen: model, rationale: "switched by you in chat", result };
           setPipe(next);
+          setShownTableId(null);
           liveRuns.current.push({ id: model.id, label: model.label, rationale: next.rationale });
           liveUpdate(next, false);
           chat.say(`running ${model.label} — the HARD pane has the result`);
@@ -533,6 +581,83 @@ export function App({
       },
     }),
     [pipe, liveUpdate],
+  );
+
+  /** Build a table, keep it on the session's shelf, show it in HARD, and
+   *  return the chat line. Reads refs, not state: pickers store this
+   *  closure and outlive the render that made it. */
+  const buildAndShow = useCallback(
+    (spec: ActuarialTableSpec, origin: TableOrigin): string => {
+      const data = pipeRef.current?.dataset ?? null;
+      let t: SessionTable;
+      try {
+        t = buildTable(spec, data, origin);
+      } catch (e) {
+        return buildFailedLine(spec, e, data);
+      }
+      const next = keepTable(tablesRef.current, t);
+      tablesRef.current = next;
+      setTables(next);
+      setShownTableId(t.id);
+      setTableOpen(false);
+      return builtLine(t);
+    },
+    [],
+  );
+
+  /** `/tables`: what the data suggests (pick to build) and what is already
+   *  built (pick to show), one widget. */
+  const tableChoices = useCallback(
+    (chat: ChatHandle): ChoiceList | null => {
+      const data = pipe?.dataset ?? null;
+      const sug = suggestTables(data);
+      const built = tablesRef.current;
+      if (sug.length === 0 && built.length === 0) return null;
+      const items = [
+        ...sug.map((x, i) => ({
+          id: `s:${i}`,
+          label: `${i + 1}. ▦ ${shortLabel(x.kind)} — ${x.title}`,
+          hint: x.why,
+        })),
+        ...built.map((t) => ({
+          id: `t:${t.id}`,
+          label: `  ✓ ${t.title}`,
+          hint: `built · ${t.dataset.rows.length}×${t.dataset.columns.length}${t.id === shownTableId ? " · showing" : ""}`,
+        })),
+      ];
+      return {
+        title: sug.length > 0 ? "tables this data suggests — ⏎ builds one" : "tables built this session",
+        items,
+        onPick: (c) => {
+          if (c.id.startsWith("t:")) {
+            setShownTableId(c.id.slice(2));
+            setTableOpen(false);
+            chat.say("showing it in HARD · /run returns to the analysis");
+            return;
+          }
+          const s = sug[Number(c.id.slice(2))];
+          if (s) chat.say(`${buildAndShow(s.spec, "suggestion")}\nprompt, to adjust and resend: ${s.prompt}`);
+        },
+      };
+    },
+    [pipe, shownTableId, buildAndShow],
+  );
+
+  /** A model reply that proposes a table (the ```table block) gets it built
+   *  — the model names the spec, Scelo computes the numbers. The block
+   *  itself is replaced by what was built, so the pane shows the outcome
+   *  rather than a wall of JSON. */
+  const onModelReply = useCallback(
+    (reply: string): string | null => {
+      const found = extractTableSpec(reply);
+      if (!found) return null;
+      // Outcome first: a chat turn shows four lines, and "built X" is the
+      // line that matters — the model's sentence of context follows it.
+      const said = found.rest ? `\n${found.rest}` : "";
+      if ("error" in found) return `the model's table spec was not usable: ${found.error}${said}`;
+      return `${buildAndShow(found.spec, "llm")}${said}`;
+    },
+    [buildAndShow],
   );
 
   /** All three bots share one intent set — an actuary mid-thought should not
@@ -570,6 +695,40 @@ export function App({
         return `loading ${r.spec.title} (${r.spec.rows}×${r.spec.cols}) — the pipeline is running on it`;
       }
 
+      // Actuarial tables. `/tables` is the menu; typed requests are handled
+      // here without the model, as the IDE does — "build a life table at
+      // 4 % from age 20 to 100" is deterministic, and it works offline.
+      if (slash && (verb === "tables" || verb === "table")) {
+        const arg = (args[0] ?? "").toLowerCase();
+        if (arg === "off" || arg === "close") {
+          if (!shownTableId) return "no table is showing";
+          setShownTableId(null);
+          return "back to the analysis";
+        }
+        const n = Number(arg);
+        if (arg !== "") {
+          const sug = suggestTables(pipe?.dataset ?? null);
+          if (Number.isInteger(n) && n >= 1 && n <= sug.length) return buildAndShow(sug[n - 1].spec, "suggestion");
+          const spec = parseRequest(args.join(" "), pipe?.dataset ?? null);
+          if (spec) return buildAndShow(spec, "chat");
+          return "usage: /tables [number|off] — or just type the request, e.g. \"build a life table at 4 % from age 20 to 100\"";
+        }
+        const list = tableChoices(chat);
+        if (!list) return noSuggestionsLine(pipe?.dataset ?? null);
+        chat.openChoices(list);
+        return "";
+      }
+      if (!slash) {
+        if (isSuggestRequest(text)) {
+          const list = tableChoices(chat);
+          if (!list) return noSuggestionsLine(pipe?.dataset ?? null);
+          chat.openChoices(list);
+          return "";
+        }
+        const spec = parseRequest(text, pipe?.dataset ?? null);
+        if (spec) return buildAndShow(spec, "chat");
+      }
+
       const known = COMMAND_NAMES.includes(verb);
       if (!slash && !known) return null;
       // Bare forms are accepted only where misfiring is implausible:
@@ -605,7 +764,7 @@ export function App({
           const next = want === "on" ? true : want === "off" ? false : !showGraph;
           setShowGraph(next);
           return next
-            ? "diagrams on — TOOLS shows the dataset feeding each candidate analysis, HARD shows the runs feeding the output"
+            ? "diagrams on — TOOLS wires the dataset to the analysis that reads it (alternatives sit unwired below), HARD shows the runs feeding the output"
             : "diagrams off — the panes give the rows back to the tables and the chat";
         }
         case "copy": {
@@ -625,9 +784,12 @@ export function App({
           let text = "";
           let what = "";
           if (pick === "table" || pick === "result" || pick === "data") {
-            if (!pipe?.result) return "no result yet — load a dataset first";
-            text = toTsv(pipe.result.columns, pipe.result.rows);
-            what = `${pipe.result.rows.length} row${pipe.result.rows.length === 1 ? "" : "s"} × ${pipe.result.columns.length} cols (tab-separated, pastes into Excel as columns)`;
+            // Whatever HARD is showing — the actuarial table when one is up.
+            const shown = shownTableRef.current;
+            const view = shown ? tableAsResult(shown) : pipe?.result;
+            if (!view) return "no result yet — load a dataset first";
+            text = toTsv(view.columns, view.rows);
+            what = `${view.rows.length} row${view.rows.length === 1 ? "" : "s"} × ${view.columns.length} cols (tab-separated, pastes into Excel as columns)`;
           } else if (pick === "reading") {
             if (!pipe) return "no dataset loaded yet";
             text = pipe.reading || pipe.degraded || "";
@@ -695,8 +857,9 @@ export function App({
         case "run": {
           if (!pipe) return "no dataset loaded yet";
           if (args.length === 0) return "usage: /run <analysis or number> — /list shows the menu";
-          const r = resolveChoice(args.join(" "), eligible);
+          const r = resolveRun(args.join(" "), eligible);
           if (!r.ok) {
+            if ("notApplicable" in r) return notApplicableText(r.notApplicable);
             return r.matches.length > 1
               ? `ambiguous — did you mean: ${r.matches.map((m) => m.label).join(" · ")}?`
               : `no analysis matches "${args.join(" ")}" — /list shows the menu`;
@@ -705,6 +868,7 @@ export function App({
             const result = r.model.run(pipe.dataset, pipe.metas);
             const next = { ...pipe, chosen: r.model, rationale: "switched by you in chat", result };
             setPipe(next);
+            setShownTableId(null);
             liveRuns.current.push({ id: r.model.id, label: r.model.label, rationale: next.rationale });
             liveUpdate(next, false);
             return `running ${r.model.label} — the HARD pane has the result`;
@@ -821,14 +985,25 @@ export function App({
       analysisChoices,
       fileChoices,
       liveUpdate,
+      shownTableId,
+      tableChoices,
+      buildAndShow,
     ],
   );
 
   // ── context each bot sees ───────────────────────────────────────────────
   // Rebuilt per send so a bot always reasons about the CURRENT state.
+  /** The ```table protocol rides on every bot's context, loaded or not —
+   *  parametric tables need no data, and the IDE teaches all three of its
+   *  stage chats the same vocabulary. */
+  const tablesCtx = useCallback(
+    () => tableProtocol(pipe?.dataset ?? null, suggestTables(pipe?.dataset ?? null), tables),
+    [pipe, tables],
+  );
+
   const softCtx = useCallback(() => {
     const p = pipe;
-    if (!p) return NO_DATA_CONTEXT("SOFT DATA");
+    if (!p) return `${NO_DATA_CONTEXT("SOFT DATA")}\n\n${tablesCtx()}`;
     return [
       "You are the SOFT DATA assistant in an actuarial terminal workstation.",
       "Answer only from the profile below. Never invent columns or numbers. Be terse — 4 lines max.",
@@ -840,12 +1015,14 @@ export function App({
       ...p.metas.map(
         (m) => `  ${m.name}: ${m.type}, unique=${m.unique}, missing=${m.missing}`,
       ),
+      "",
+      tablesCtx(),
     ].join("\n");
-  }, [pipe]);
+  }, [pipe, tablesCtx]);
 
   const toolsCtx = useCallback(() => {
     const p = pipe;
-    if (!p) return NO_DATA_CONTEXT("TOOLS");
+    if (!p) return `${NO_DATA_CONTEXT("TOOLS")}\n\n${tablesCtx()}`;
     return [
       "You are the TOOLS assistant. You explain and revise the agent's choice of analysis.",
       "Be terse — 4 lines max. Never claim to have run anything.",
@@ -853,26 +1030,34 @@ export function App({
       `chosen: ${p.chosen?.label ?? "none"}`,
       `why: ${p.rationale}`,
       `dataset: ${p.dataset.name}, ${p.dataset.rows.length} rows`,
+      "",
+      tablesCtx(),
     ].join("\n");
-  }, [pipe]);
+  }, [pipe, tablesCtx]);
 
   const hardCtx = useCallback(() => {
     const p = pipe;
-    if (!p?.result) return NO_DATA_CONTEXT("HARD DATA");
+    const shown = shownTableRef.current;
+    // What the pane is showing is what "this table" means to the user.
+    const view = shown ? tableAsResult(shown) : p?.result;
+    if (!view) return `${NO_DATA_CONTEXT("HARD DATA")}\n\n${tablesCtx()}`;
     return [
       "You are the HARD DATA assistant. You interpret the result table below.",
       "Answer only from it. Be terse — 4 lines max.",
       "",
-      `analysis: ${p.chosen?.label}`,
-      `headline: ${p.result.headline}`,
-      p.result.columns.join(" | "),
-      ...p.result.rows.slice(0, 12).map((r) => r.join(" | ")),
+      shown ? `actuarial table: ${shown.title} (${shown.basisLabel})` : `analysis: ${p?.chosen?.label}`,
+      ...(shown ? shown.notes.map((n) => `note: ${n}`) : []),
+      `headline: ${view.headline}`,
+      view.columns.join(" | "),
+      ...view.rows.slice(0, 12).map((r) => r.join(" | ")),
+      "",
+      tablesCtx(),
     ].join("\n");
-  }, [pipe]);
+  }, [pipe, tablesCtx]);
 
-  const softChat = useChat({ context: softCtx, onLocal: (t) => handleIntent(t, softChat) });
-  const toolsChat = useChat({ context: toolsCtx, onLocal: (t) => handleIntent(t, toolsChat) });
-  const hardChat = useChat({ context: hardCtx, onLocal: (t) => handleIntent(t, hardChat) });
+  const softChat = useChat({ context: softCtx, onLocal: (t) => handleIntent(t, softChat), onReply: onModelReply });
+  const toolsChat = useChat({ context: toolsCtx, onLocal: (t) => handleIntent(t, toolsChat), onReply: onModelReply });
+  const hardChat = useChat({ context: hardCtx, onLocal: (t) => handleIntent(t, hardChat), onReply: onModelReply });
   const chats = { soft: softChat, tools: toolsChat, hard: hardChat };
   const active = chats[focus];
 
@@ -1229,6 +1414,11 @@ export function App({
   }
 
   const p = pipe;
+  const shownTable = shownTableId ? (tables.find((t) => t.id === shownTableId) ?? null) : null;
+  /** What HARD shows: the table you asked for, else the analysis result. */
+  const hardView: ModelResult | null = shownTable
+    ? tableAsResult(shownTable, { compact: true })
+    : (p?.result ?? null);
 
   // ── /charts, on its own screen ──────────────────────────────────────────
   // Listing is cheap (an `applies` check per analysis); BUILDING one runs the
@@ -1301,7 +1491,11 @@ export function App({
   // SOFT spends seven rows on the file and summary blocks before the reading
   // starts (eight when a column was dropped), then a blank, and Prose adds a
   // "…" row of its own when it clips.
-  const softFixed = 7 + (p?.clean && p.clean.droppedColumns.length > 0 ? 1 : 0);
+  // Suggested only from what the data actually carries — a file with
+  // nothing actuarial in it gets no line rather than an empty promise.
+  const tableIdeas = p ? suggestTables(p.dataset) : [];
+  const softFixed =
+    7 + (p?.clean && p.clean.droppedColumns.length > 0 ? 1 : 0) + (tableIdeas.length > 0 ? 1 : 0);
   // The empty state's budget, which is a different shape: the "file(s)" head
   // (2), a blank, the greeting, another blank, and the four lines telling you
   // how to load something. The greeting gets what the hints leave, and the
@@ -1390,11 +1584,11 @@ export function App({
   // stacked HARD is a third of the height a column was, and overflowing it
   // draws the plot over the pane's own border.
   const tableRows = Math.max(1, tableOpen ? tableFits : Math.min(TABLE_ROWS, tableFits));
-  const tableBody = p?.result ? Math.min(tableRows, p.result.rows.length) : 0;
+  const tableBody = hardView ? Math.min(tableRows, hardView.rows.length) : 0;
   // Only a truncated table has a footer to click; an expanded one always
   // does, because collapsing it again has to be reachable the same way.
   clickTargets.current.tableFooter =
-    p?.result && (tableOpen || p.result.rows.length > tableBody)
+    hardView && (tableOpen || hardView.rows.length > tableBody)
       ? tableFooterRow(tableBody, clickTargets.current.paneTops[2])
       : null;
   // Bars the sparkline may draw, from whatever the table left. Zero means it
@@ -1410,13 +1604,16 @@ export function App({
           1 - // the blank above the table
           1 - // the table's own header row
           tableBody -
-          (p?.result && p.result.rows.length > tableBody ? 1 : 0) -
+          (hardView && hardView.rows.length > tableBody ? 1 : 0) -
           2 - // "plot" head
           1, // the series label
       );
 
   const hardDiagram = (() => {
-    if (!showGraph || !p?.result || tableOpen) return [];
+    // A shown table is not a run: the flow of runs into the export belongs
+    // to the analysis view, and drawing it under a life table would wire
+    // the table into a picture it is not part of.
+    if (!showGraph || !p?.result || tableOpen || shownTable) return [];
     // The numbers come first: the table, then the plot. The diagram gets
     // what is left of the pane, or it does not appear.
     const body = p.result.rows.length;
@@ -1443,7 +1640,9 @@ export function App({
     return fanIn(
       runs.map((r) => ({
         label: r.label,
-        status: r.id === p.chosen?.id ? ("live" as const) : ("live" as const),
+        // Every run feeds the export (the R script restates each one), so
+        // every wire here carries something — all of them are live.
+        status: "live" as const,
       })),
       {
         label: p.result.headline,
@@ -1515,6 +1714,13 @@ export function App({
               </Text>
               {p.clean && p.clean.droppedColumns.length > 0 && (
                 <Text color={theme.warn}>dropped: {p.clean.droppedColumns.join(", ")}</Text>
+              )}
+              {tableIdeas.length > 0 && (
+                // The IDE's "table ideas" strip, as one line: what follows
+                // from this data, and where to build it.
+                <Text color={theme.soft} wrap="truncate">
+                  ▦ tables: {tableIdeas.map((x) => shortLabel(x.kind)).join(" · ")} — /tables
+                </Text>
               )}
               {readingLines > 0 && (
               <Box marginTop={1}>
@@ -1672,31 +1878,36 @@ export function App({
           width={widths[2]}
           height={stacked ? hardH : undefined}
         >
-          {p?.result ? (
+          {hardView ? (
             <>
-              <Head>table</Head>
-              <Text color={theme.hard}>{p.result.headline}</Text>
+              <Head>{shownTable ? "actuarial table · /run returns" : "table"}</Head>
+              {/* One row: the budget above counts the headline as one, and a
+                  long table title wrapping to two pushed the table's last
+                  row under the chat. */}
+              <Text color={theme.hard} wrap="truncate">
+                {hardView.headline}
+              </Text>
               <Box marginTop={1}>
                 <Table
-                  columns={p.result.columns}
-                  rows={p.result.rows}
+                  columns={hardView.columns}
+                  rows={hardView.rows}
                   width={hardW}
                   maxRows={tableRows}
                   expanded={tableOpen}
                 />
               </Box>
-              {p.result.series && plotBars > 0 && (
+              {hardView.series && plotBars > 0 && (
                 <>
                   <Head>plot</Head>
                   {/* The pane's plot is a sparkline's budget — five rows and
                       forty columns. Saying where the full-size one lives
                       costs no rows here, which a separate hint line would. */}
                   <Text color={theme.mute} wrap="truncate">
-                    {p.result.series.label} · /charts
+                    {hardView.series.label} · /charts
                   </Text>
                   <BarPlot
-                    values={p.result.series.values}
-                    labels={p.result.series.labels}
+                    values={hardView.series.values}
+                    labels={hardView.series.labels}
                     width={hardW}
                     color={theme.hard}
                     max={plotBars}

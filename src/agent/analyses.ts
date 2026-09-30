@@ -26,6 +26,10 @@ export type ModelChoice = {
   label: string;
   /** When this model is applicable at all, checked before the LLM sees it. */
   applies: (metas: ColumnMeta[]) => boolean;
+  /** What the data must have for `applies` to hold, in words — the IDE
+   *  catalog's `needs`. Shown when you ask for an analysis this data cannot
+   *  feed, so the answer is "not applicable: it needs …", not "no match". */
+  needs: string;
   /** Runs headlessly and returns a small result table. */
   run: (dataset: Dataset, metas: ColumnMeta[]) => ModelResult;
 };
@@ -141,6 +145,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "numeric-summary",
     label: "Descriptive summary",
+    needs: "at least one numeric column",
     applies: (m) => numericColumns(m).length > 0,
     run: (d, metas) => {
       // The SAME profile the IDE's descriptive report computes
@@ -193,6 +198,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "group-metric",
     label: "Value by segment",
+    needs: "a numeric value column and a categorical column with 2–12 levels",
     applies: (m) => valueColumn(m) !== null && groupColumn(m) !== null,
     run: (dataset, metas) => {
       const value = valueColumn(metas);
@@ -226,6 +232,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "frequency",
     label: "Frequency / exposure profile",
+    needs: "a categorical column with 2–40 levels",
     applies: (m) => m.some((x) => x.type === "string" && x.unique > 1 && x.unique <= 40),
     run: (_d, metas) => {
       const cat = frequencyColumn(metas);
@@ -252,6 +259,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "time-profile",
     label: "Time profile",
+    needs: "a date column",
     applies: (m) => dateColumn(m) !== null,
     run: (dataset, metas) => {
       const dc = dateColumn(metas);
@@ -296,6 +304,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "concentration",
     label: "Concentration / Gini",
+    needs: "a non-negative value column with more than 5 distinct values",
     applies: (m) => {
       const v = valueColumn(m);
       return v !== null && (v.min ?? -1) >= 0 && v.unique > 5;
@@ -332,6 +341,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "correlation",
     label: "Correlation screen",
+    needs: "at least two numeric columns",
     applies: (m) => numericColumns(m).length >= 2,
     run: (dataset, metas) => {
       // Cap the screen at 12 columns: 66 pairs is readable, 465 is noise.
@@ -368,6 +378,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "outliers",
     label: "Outlier audit",
+    needs: "at least one numeric column",
     applies: (m) => numericColumns(m).length > 0,
     run: (dataset, metas) => {
       const findings: Array<{ name: string; n: number; count: number; lo: number; hi: number }> = [];
@@ -410,6 +421,7 @@ export const MODELS: ModelChoice[] = [
   {
     id: "missingness",
     label: "Missingness / data-quality audit",
+    needs: "a column with missing values — this data has none",
     applies: (m) => m.some((x) => x.missing > 0),
     run: (_d, metas) => {
       const withGaps = metas
@@ -457,4 +469,31 @@ export function resolveChoice(
   );
   if (partial.length === 1) return { ok: true, model: partial[0] };
   return { ok: false, matches: partial };
+}
+
+/**
+ * `/run` against the WHOLE menu, so an analysis this data cannot feed is
+ * recognised and explained rather than reported as unknown. The IDE's rule
+ * since 0.2: a model whose inputs are absent is not a failure and not a
+ * typo, it is *not applicable* — said neutrally, with what it needs.
+ * Numbers still index the eligible list, because that is the list /list
+ * numbered.
+ */
+export function resolveRun(
+  what: string,
+  eligible: ModelChoice[],
+):
+  | { ok: true; model: ModelChoice }
+  | { ok: false; notApplicable: ModelChoice }
+  | { ok: false; matches: ModelChoice[] } {
+  const hit = resolveChoice(what, eligible);
+  if (hit.ok || hit.matches.length > 1 || Number.isInteger(Number(what.trim()))) return hit;
+  const wider = resolveChoice(what, MODELS);
+  if (wider.ok && !eligible.includes(wider.model)) return { ok: false, notApplicable: wider.model };
+  return hit;
+}
+
+/** The neutral line for an analysis that does not apply. */
+export function notApplicableText(m: ModelChoice): string {
+  return `${m.label} does not apply to this data — it needs ${m.needs}. /list shows what does.`;
 }

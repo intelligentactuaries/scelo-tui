@@ -31,6 +31,7 @@ export const COMMANDS: Command[] = [
   { name: "list", hint: "the analyses that apply to this data", standalone: true },
   { name: "charts", args: "[number]", hint: "every plot this data makes, full screen", standalone: true },
   { name: "run", args: "<analysis|number>", hint: "switch the analysis", standalone: false },
+  { name: "tables", args: "[number|off]", hint: "actuarial tables this data suggests — build one", standalone: true },
   { name: "show", args: "<column>", hint: "one column's profile", standalone: false },
   { name: "graph", args: "[on|off]", hint: "the node/edge diagrams in tools and output", standalone: true },
   { name: "copy", args: "[table|reading|reply]", hint: "put values on the clipboard, no dragging", standalone: true },
@@ -79,6 +80,8 @@ export function helpText(): string {
     "  clipboard instead, with no borders or padding caught in them.",
     "  /mouse on adds click-to-focus; selecting then needs shift held.",
     "a bare number answers whichever menu was just printed",
+    'tables: type the request — "build a life table at 4 % from age 20 to 100",',
+    '  "build a commutation table at 3.5 %", "suggest tables" — no model needed',
     "anything else goes to the model",
   ].join("\n");
 }

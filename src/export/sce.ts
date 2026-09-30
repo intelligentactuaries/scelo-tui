@@ -17,10 +17,20 @@
 //     on a result card. The events log carries what actually happened.
 
 import type { PipelineResult } from "../agent/pipeline";
+import type { SessionTable } from "../agent/tables";
 
 export const SCE_MAGIC = "scelo-project";
 export const SCE_VERSION = 1;
 export const SCE_EXTENSION = ".sce";
+
+/** The IDE's WIRES_VERSION (sceloContext.tsx). Written so the IDE takes our
+ *  empty `modelWires` as a deliberate "nothing wired" under the typed-pin
+ *  contract rather than a pre-0.2 file to migrate and auto-wire. */
+export const SCE_WIRES_VERSION = 2;
+
+/** The IDE caps persisted tables at this many rows; so do we, so a file we
+ *  write never holds more than one the IDE would save. */
+export const SCE_TABLE_MAX_ROWS = 2_000;
 
 /** Matches the IDE's slugify: lowercase, keep [a-z0-9_-], collapse the rest
  *  to hyphens, cap at 60, never empty. */
@@ -41,7 +51,7 @@ export function sceFilename(datasetName: string): string {
 /** The activity-log slice of the session. The IDE's script exporters replay
  *  these events in order, so the .sce round-trips into the IDE's own
  *  Python/R export screens with the load + clean + pick steps intact. */
-function buildEvents(pipe: PipelineResult, now: Date): unknown[] {
+function buildEvents(pipe: PipelineResult, now: Date, tables: SessionTable[] = []): unknown[] {
   const t0 = now.getTime();
   const events: unknown[] = [
     {
@@ -99,10 +109,20 @@ function buildEvents(pipe: PipelineResult, now: Date): unknown[] {
       });
     }
   }
+  // The IDE logs a table.build per table; same payload, so its activity
+  // view reads ours the same way.
+  for (const [i, t] of tables.entries()) {
+    events.push({
+      ts: t0 + 4 + i,
+      stage: "hard",
+      kind: "table.build",
+      payload: { id: t.id, title: t.title, kind: t.spec.kind, origin: t.origin, spec: t.spec },
+    });
+  }
   return events;
 }
 
-export function buildSce(pipe: PipelineResult, now: Date): string {
+export function buildSce(pipe: PipelineResult, now: Date, tables: SessionTable[] = []): string {
   const file = {
     format: SCE_MAGIC,
     version: SCE_VERSION,
@@ -119,10 +139,15 @@ export function buildSce(pipe: PipelineResult, now: Date): string {
       pickSummary: pipe.chosen ? `${pipe.chosen.label} — ${pipe.rationale}` : null,
       picksDatasetName: pipe.chosen ? pipe.dataset.name : null,
       modelWires: [],
+      wiresVersion: SCE_WIRES_VERSION,
       runs: {},
       derivedColumns: {},
       transformLog: [],
-      events: buildEvents(pipe, now),
+      events: buildEvents(pipe, now, tables),
+      tables: tables.map((t) => ({
+        ...t,
+        dataset: { ...t.dataset, rows: t.dataset.rows.slice(0, SCE_TABLE_MAX_ROWS) },
+      })),
     },
   };
   return `${JSON.stringify(file)}\n`;

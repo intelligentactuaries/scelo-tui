@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { type Dataset, summariseDataset } from "@scelo/core";
 import {
   MODELS,
+  notApplicableText,
+  resolveRun,
   MODEL_BY_ID,
   dateColumn,
   groupColumn,
@@ -219,5 +221,24 @@ describe("resolveChoice", () => {
     const r = resolveChoice("chain ladder", eligible);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.matches).toHaveLength(0);
+  });
+});
+
+describe("/run on an analysis the data cannot feed", () => {
+  test("is recognised and explained, not 'no match'", () => {
+    const eligible = MODELS.filter((m) => m.id !== "time-profile");
+    const r = resolveRun("time", eligible);
+    expect(r.ok).toBe(false);
+    expect("notApplicable" in r && r.notApplicable.id).toBe("time-profile");
+    if ("notApplicable" in r) expect(notApplicableText(r.notApplicable)).toContain("needs a date column");
+  });
+  test("a number still indexes the eligible list only", () => {
+    const eligible = MODELS.slice(0, 2);
+    const r = resolveRun("5", eligible);
+    expect(r.ok).toBe(false);
+    expect("notApplicable" in r).toBe(false);
+  });
+  test("every analysis says what it needs", () => {
+    for (const m of MODELS) expect(m.needs.length).toBeGreaterThan(5);
   });
 });
