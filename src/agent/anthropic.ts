@@ -58,7 +58,7 @@ function budget(maxTokens: number | undefined): number {
 }
 
 /**
- * Server-side refusal fallback. Claude Opus 5 and Fable 5 can decline a
+ * Server-side refusal fallback. Opus 5.x, Fable 5.x and Sonnet 5.5 can decline a
  * request outright; with this on, the API re-runs it on a fallback model
  * inside the same call rather than handing back an empty response.
  *
@@ -67,7 +67,7 @@ function budget(maxTokens: number | undefined): number {
  * one of them. `null` means "not established yet".
  */
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
-const FALLBACK_MODELS = /^claude-(opus-5|fable-5|mythos-5)$/;
+const FALLBACK_MODELS = /^claude-(opus-5|opus-5-5|fable-5|fable-5-1|mythos-5|mythos-5-1|sonnet-5-5)$/;
 let fallbacksUsable: boolean | null = null;
 
 function fallbackParams(model: string): {
@@ -91,6 +91,15 @@ function rejectedFallback(e: unknown): boolean {
  *  right lever generally, since disabling thinking outright on Opus 5 invites
  *  reasoning leaking into the visible reply. */
 const EFFORT = "low" as const;
+
+/** `output_config.effort` is rejected outright by the models that predate it
+ *  — Haiku 4.5 among them, which is on the picker — so it is sent only where
+ *  it is accepted rather than turning every Haiku request into a 400. */
+const NO_EFFORT = /^claude-(haiku-4-5|sonnet-4-5|opus-4-1|opus-4-0|sonnet-4-0|3)/;
+
+export function effortParams(model: string): { output_config?: { effort: typeof EFFORT } } {
+  return NO_EFFORT.test(model) ? {} : { output_config: { effort: EFFORT } };
+}
 
 function textOf(content: Array<{ type: string; text?: string }>): string {
   return content
@@ -139,7 +148,7 @@ export const anthropic: Adapter = {
           max_tokens: budget(opts.maxTokens),
           ...(system ? { system } : {}),
           messages: turns,
-          output_config: { effort: EFFORT },
+          ...effortParams(model),
           ...extra,
         },
         { signal: opts.signal },
@@ -169,7 +178,7 @@ export const anthropic: Adapter = {
           max_tokens: budget(opts.maxTokens),
           ...(system ? { system } : {}),
           messages: turns,
-          output_config: { effort: EFFORT },
+          ...effortParams(model),
           ...extra,
         },
         { signal: opts.signal },

@@ -11,6 +11,7 @@
 
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { claudeBin, resetClaudeCode } from "../agent/claudeCode";
 import { keyFor, loadConfig, maskKey, saveConfig } from "../agent/config";
 import { discoverModels, getActive, llmAvailable, reloadConfig } from "../agent/llm";
 import { PROVIDERS, type Provider, type ProviderId, type Selection } from "../agent/providers";
@@ -65,6 +66,9 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
   useEffect(() => {
     let live = true;
     const cfg = loadConfig();
+    // `r` after installing or signing in to the CLI must look again, not
+    // answer from the first probe's cached "not found".
+    resetClaudeCode();
     for (const p of PROVIDERS) {
       void (async () => {
         const key = keyFor(cfg, p.id, p.envKey);
@@ -124,7 +128,11 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
               ? `no api key — press k${p.keyHint ? ` · ${p.keyHint}` : ""}`
               : p.id === "ollama"
                 ? "not running — start ollama, then press r"
-                : "unreachable — press k to replace the key, or r to retry",
+                : p.id === "claude-code"
+                  ? claudeBin()
+                    ? "not signed in — run `claude` once and log in, then press r"
+                    : "claude cli not found — install claude code (claude.com/claude-code), then press r"
+                  : "unreachable — press k to replace the key, or r to retry",
         });
       } else if (probe.models.length > list.length) {
         out.push({
@@ -426,7 +434,11 @@ export function Intro({ onStart }: { onStart: (sel: Selection) => void }) {
 const CONFIG_NOTE = "~/.config/scelo-tui/config.json";
 
 function accentFor(id: ProviderId): string {
-  return id === "ollama" ? theme.soft : id === "anthropic" ? theme.tools : theme.hard;
+  return id === "ollama"
+    ? theme.soft
+    : id === "anthropic" || id === "claude-code"
+      ? theme.tools
+      : theme.hard;
 }
 
 function statusColour(state: Probe["state"] | undefined): string {
