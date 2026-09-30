@@ -17,7 +17,8 @@ import type { PipelineResult } from "../agent/pipeline";
 import { toCsv } from "./csv";
 import { ALL_TARGETS, exportArtifacts, parseTarget, parseTargets } from "./index";
 import { buildNotebook } from "./notebook";
-import { buildSce, sceFilename } from "./sce";
+import { SCE_WIRES_VERSION, buildSce, sceFilename } from "./sce";
+import { buildTable, parseRequest } from "../agent/tables";
 import { buildPython, buildR, coveredAnalyses } from "./scripts";
 import { DATA_SHEET_CAP } from "./workbook";
 import { buildZip, crc32 } from "./zip";
@@ -358,6 +359,24 @@ describe(".sce project file", () => {
     expect(kinds).toEqual(["dataset.load", "cleaning.auto", "models.aiPick", "runs.execute"]);
   });
 
+  test("carries the session's actuarial tables, in the IDE's shape", async () => {
+    const spec = parseRequest("build a life table on the illustrative Gompertz-Makeham basis at 4 % from age 20 to 110", null);
+    if (!spec) throw new Error("fixture spec did not parse");
+    const table = buildTable(spec, null, "chat", NOW.getTime());
+    const text = buildSce(pipeFor("group-metric"), NOW, [table]);
+    const sce = JSON.parse(text);
+    expect(sce.session.wiresVersion).toBe(SCE_WIRES_VERSION);
+    expect(sce.session.tables).toHaveLength(1);
+    expect(sce.session.tables[0]).toMatchObject({ id: table.id, title: table.title, origin: "chat", sourceDataset: null });
+    expect(sce.session.tables[0].dataset.rows).toHaveLength(91);
+    const kinds = sce.session.events.map((e: { kind: string }) => e.kind);
+    expect(kinds.at(-1)).toBe("table.build");
+    // Still a file the IDE opens, and it keeps the wiring contract.
+    const idePath = "../../../scelo/apps/web/src/components/Scelo/projectFile.ts";
+    const ide = (await import(idePath)) as { parseSce: (t: string) => { session: { wiresVersion?: number } } };
+    expect(ide.parseSce(text).session.wiresVersion).toBe(SCE_WIRES_VERSION);
+  });
+
   test("filename matches the IDE's suggestion rules", () => {
     expect(sceFilename("My Book (2026).csv")).toBe("my-book-2026.sce");
     expect(sceFilename("weird///.csv")).toBe("weird.sce");
@@ -373,6 +392,16 @@ describe("exportArtifacts", () => {
     );
     expect(new Set(readdirSync(outDir))).toEqual(new Set(files.map((f) => f.name)));
     for (const f of files) expect(f.bytes).toBeGreaterThan(0);
+  });
+
+  test("each built table is written as a csv beside the data", () => {
+    const dir = mkdtempSync(join(tmpdir(), "scelo-tables-"));
+    const spec = parseRequest("build discount factors at a flat 5 % out to 40 years", null);
+    if (!spec) throw new Error("fixture spec did not parse");
+    const table = buildTable(spec, null, "chat");
+    const { files } = exportArtifacts(pipeFor("group-metric"), { targets: ["csv"], cwd: dir, now: NOW, tables: [table] });
+    const csv = files.map((f) => f.name).find((n) => n.startsWith("table-"));
+    expect(csv).toMatch(/^table-.*\.csv$/);
   });
 
   test("a script target always brings data.csv with it", () => {

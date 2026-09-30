@@ -110,6 +110,7 @@ nav:
       - The pipeline: guide/pipeline.md
       - Analyses: guide/analyses.md
       - Charts: guide/charts.md
+      - Actuarial tables: guide/tables.md
       - Steering it in chat: guide/chat.md
       - Export: guide/export.md
       - The live mirror: guide/live.md

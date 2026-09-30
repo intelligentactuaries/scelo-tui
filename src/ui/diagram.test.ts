@@ -35,20 +35,27 @@ describe("fanOut (TOOLS: dataset hub → candidate analyses)", () => {
     expect(out.join("\n")).toContain("book.csv");
   });
 
-  test("arrows point AT the leaves, one branch each, last one closing", () => {
+  test("an arrow points AT the analysis that reads the data, and only at it", () => {
     const out = render(fanOut(hub, leaves, { width: 48, accent: ACCENT })).join("\n");
-    expect(out.match(/[├└][─┄]▶/g) ?? []).toHaveLength(3);
-    expect(out).toContain("└");
+    expect(out.match(/[├└]─▶/g) ?? []).toHaveLength(1);
   });
 
-  test("a live branch is solid, an inactive one dashed", () => {
+  test("alternatives are unwired — the Blueprint rule: no wire where nothing flows", () => {
     const out = render(fanOut(hub, leaves, { width: 48, accent: ACCENT }));
     const live = out.find((l) => l.includes("Missingness")) ?? "";
     const idle = out.find((l) => l.includes("Correlation")) ?? "";
     expect(live).toContain("─▶");
     expect(live).toContain("●");
-    expect(idle).toContain("┄▶");
+    expect(idle).not.toMatch(/[▶┄├└]/);
     expect(idle).toContain("·");
+    // Nothing dashed anywhere: a dashed edge still claims a connection.
+    expect(out.join("\n")).not.toContain("┄");
+  });
+
+  test("the wired leaf leads even when it arrives last", () => {
+    const out = render(fanOut(hub, [...leaves].reverse(), { width: 48, accent: ACCENT }));
+    const at = (s: string) => out.findIndex((l) => l.includes(s));
+    expect(at("Missingness")).toBeLessThan(at("Outliers"));
   });
 
   test("the row budget truncates and SAYS it truncated", () => {
@@ -58,8 +65,9 @@ describe("fanOut (TOOLS: dataset hub → candidate analyses)", () => {
     }));
     const out = render(fanOut(hub, many, { width: 48, accent: ACCENT, maxLeaves: 3 }));
     expect(out.join("\n")).toContain("+6 more");
-    // 4 hub lines + 1 spine + 3 leaves × 3 + 1 truncation note
-    expect(out).toHaveLength(15);
+    // 4 hub lines + 3 leaves × 3 + 1 truncation note — no spine, because
+    // none of them is wired (the row budget in App still allows for one)
+    expect(out).toHaveLength(14);
   });
 
   test("too narrow to draw a box draws nothing rather than a mess", () => {

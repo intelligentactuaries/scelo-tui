@@ -130,12 +130,20 @@ function fit(
 }
 
 /**
- * TOOLS: the dataset hub, fanning out to the analyses that apply to it.
+ * TOOLS: the dataset hub, wired to the analysis that consumes it, with the
+ * alternatives beneath it UNWIRED.
  *
- * The star is flattened onto a spine dropping from the hub's left shoulder,
- * with one arrow per leaf — a fan-out drawn as a bus, because a real radial
- * fan needs width a pane does not have. `maxLeaves` is a ROW budget, not a
- * preference: the pane also owns a stage list, a rationale and a chat.
+ * The Blueprint rule the IDE's Tools canvas adopted in 0.2: a wire exists
+ * only where data actually flows. Only the analysis that ran reads the
+ * dataset, so only it gets an arrow; the others are what `/run` could wire
+ * in next, drawn as free-standing muted boxes with no connector at all —
+ * a dashed arrow to them used to say "something flows here" when nothing
+ * did. Several live leaves (none today, but the shape allows it) share one
+ * spine dropping from the hub's left shoulder: a fan-out drawn as a bus,
+ * because a real radial fan needs width a pane does not have.
+ *
+ * `maxLeaves` is a ROW budget, not a preference: the pane also owns a stage
+ * list, a rationale and a chat.
  */
 export function fanOut(
   hub: DiagramNode,
@@ -145,8 +153,13 @@ export function fanOut(
   const { width, accent } = opts;
   if (width < MIN_WIDTH) return [];
   const max = Math.max(1, opts.maxLeaves ?? leaves.length);
-  const shown = leaves.slice(0, max);
-  const hidden = leaves.length - shown.length;
+  // Wired leaves first, whatever order they arrived in — they are the ones
+  // the spine has to reach.
+  const ordered = [...leaves.filter((l) => l.status !== "idle"), ...leaves.filter((l) => l.status === "idle")];
+  const shown = ordered.slice(0, max);
+  const hidden = ordered.length - shown.length;
+  const wired = shown.filter((l) => l.status !== "idle");
+  const loose = shown.filter((l) => l.status === "idle");
 
   // The hub's first line carries a 2-char marker before its label.
   const hubInner = fit([hub.label], width - 4, 2, [hub.detail]);
@@ -163,22 +176,12 @@ export function fanOut(
   );
   if (leafInner < 6) return out;
 
-  out.push([{ text: SP }, { text: "│", color: accent }]);
-  for (const [i, leaf] of shown.entries()) {
-    const last = i === shown.length - 1 && hidden === 0;
+  if (wired.length > 0) out.push([{ text: SP }, { text: "│", color: accent }]);
+  for (const [i, leaf] of wired.entries()) {
+    const last = i === wired.length - 1;
     const box = leafBox(leaf, leafInner, accent);
-    const live = leaf.status !== "idle";
-    const edgeCol = live ? accent : theme.mute;
-    // A dashed shaft for an inactive edge, mirroring the canvas's dashed
-    // strokes: the connector says whether the branch is carrying anything.
-    const shaft = live ? "─▶" : "┄▶";
     out.push([{ text: SP }, { text: "│", color: accent }, { text: "  " }, ...box[0]]);
-    out.push([
-      { text: SP },
-      { text: last ? "└" : "├", color: accent },
-      { text: shaft, color: edgeCol },
-      ...box[1],
-    ]);
+    out.push([{ text: SP }, { text: last ? "└" : "├", color: accent }, { text: "─▶", color: accent }, ...box[1]]);
     out.push([
       { text: SP },
       { text: last ? " " : "│", color: last ? undefined : accent },
@@ -186,12 +189,13 @@ export function fanOut(
       ...box[2],
     ]);
   }
+  // Unwired: same column as the wired boxes so they read as the same kind
+  // of thing, but nothing leads into them.
+  for (const leaf of loose) {
+    for (const line of leafBox(leaf, leafInner, accent)) out.push([{ text: `${SP}   ` }, ...line]);
+  }
   if (hidden > 0) {
-    out.push([
-      { text: SP },
-      { text: "└┄▶ ", color: theme.mute },
-      { text: `+${hidden} more · /list`, color: theme.mute },
-    ]);
+    out.push([{ text: `${SP}   ` }, { text: `+${hidden} more · /list`, color: theme.mute }]);
   }
   return out;
 }

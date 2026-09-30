@@ -208,6 +208,10 @@ export function useChat(args: {
   context: () => string;
   /** Deterministic intents handled locally; return a reply to skip the model. */
   onLocal?: (text: string) => string | null;
+  /** Sees each finished model reply; returning text REWRITES that reply.
+   *  How a ```table block becomes the table it names, instead of a wall of
+   *  JSON left in the pane. Null leaves the reply as it streamed. */
+  onReply?: (reply: string) => string | null;
 }): ChatHandle {
   const [turns, setTurns] = useState<Turn[]>([]);
   // Draft and caret move as one value — a caret outside the text is
@@ -428,6 +432,9 @@ export function useChat(args: {
         }
         if (acc.trim() === "") {
           writeStream({ role: "bot", text: "(the model returned nothing)", local: true, tag });
+        } else {
+          const rewritten = args.onReply?.(acc);
+          if (rewritten != null) writeStream({ role: "bot", text: rewritten, tag });
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

@@ -43,8 +43,14 @@ pipeline
 ```
 
 Below it, **analyses** shows the menu as a node diagram: the dataset at the top,
-the chosen analysis marked `●` and connected with a solid arrow, the runners-up
-marked `·` on dotted ones, and `+5 more · /list` for the tail.
+wired to the chosen analysis (marked `●`), with the alternatives (marked `·`)
+standing **unwired** below it and `+5 more · /list` for the tail.
+
+The wiring follows the rule the Scelo IDE's Tools canvas adopted in 0.2, taken
+from Unreal Engine's Blueprints: **a wire exists only where data actually
+flows.** Only the analysis that ran reads the dataset, so only it gets an
+arrow. The alternatives are what `/run` could wire in next, and a dashed arrow
+to them would claim a connection that carries nothing.
 
 Under that is the agent's stated rationale, in its own words. If you disagree
 with the choice, this is the pane whose chat box changes it, or use
@@ -55,14 +61,18 @@ with the choice, this is the pane whose chat box changes it, or use
 The result, three ways.
 
 **table** is the analysis output. `ctrl-t` expands it when there are more rows
-than fit; press it again to shut it.
+than fit; press it again to shut it. When you build an
+[actuarial table](tables.md), it takes this spot, headed *actuarial table ·
+/run returns*, until you run an analysis again or type `/tables off`.
 
 **plot** is the same numbers as a bar chart, sized to the pane. The header line
 names the plot and points at `/charts` for the full-screen
 [gallery](charts.md).
 
-**flow** is a small node diagram of the provenance: which analysis produced this
-result, how many runs have happened, and the reminder that `ctrl-e` exports.
+**flow** is a small node diagram of the provenance: every analysis this session
+ran, each wired into the output (the export restates every one of them), how
+many runs have happened, and the reminder that `ctrl-e` exports. It stands down
+while an actuarial table is showing, because a table is not a run.
 
 `/graph off` turns both diagrams off and gives the rows back to the tables and
 the chat. `/graph on` brings them back.

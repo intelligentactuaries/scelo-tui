@@ -77,6 +77,7 @@ the deterministic parts of that work with or without a model:
 /list                 the analyses that apply to this data (numbered)
 /run gini             switch the analysis — the HARD pane re-renders
 /run 3                same, by menu number
+/tables               actuarial tables this data suggests — ⏎ builds one
 /show premium         one column's profile as a card
 /export               everything, into ./<name>.scelo-export/
 /export excel r       just those formats
@@ -120,10 +121,41 @@ shape, switchable by you with `/run`:
 | Outlier audit | which columns have values outside 1.5·IQR? |
 | Missingness audit | where are the holes? |
 
+Each analysis also states what it **needs** (the IDE catalog's `needs`), so
+`/run time` on data with no dates answers "Time profile does not apply to
+this data — it needs a date column", neutrally, instead of "no match". The
+IDE's 0.2 rule: absent inputs are *not applicable*, not an error.
+
 Everything here profiles and screens; model *fits* (chain-ladder, GLMs,
 Lee-Carter) stay in the IDE, where there is room to show diagnostics. A
 terminal pane pretending to fit a GLM would produce a number nobody should
 trust.
+
+## Actuarial tables
+
+The table vocabulary the Scelo IDE gave every stage chat in 0.2, on the same
+engine (`@scelo/core`'s `actuarialTables` — shared, not ported): life
+tables, commutation columns, annuity/assurance factors, net premium grids,
+run-off triangles, discount curves, A/E studies, model points.
+
+```
+/tables                                   what this data suggests — ⏎ builds one
+build a life table at 4 % from age 20 to 100
+build a cumulative run-off triangle of `paid` by `origin_year` and `dev_period`
+suggest tables
+```
+
+Typed requests are parsed and built **locally, with no model** — offline,
+and the same answer every time. Anything else goes to the model, which knows
+the IDE's ```table protocol: it names a spec, Scelo computes the numbers,
+and the pane shows the outcome first. With no mortality in the data, tables
+use Scelo's illustrative Gompertz–Makeham basis and say so in the title.
+
+A built table shows in HARD in place of the analysis (`/run` or
+`/tables off` brings the analysis back), `/copy table` takes it at full
+precision, and `/export` writes each as `table-<title>.csv` and puts them in
+the `.sce` in the IDE's own `WorkspaceTable` shape — same ids as the IDE
+gives the same spec.
 
 ## Export
 
@@ -237,7 +269,8 @@ first half of it; the OSC bridge is the natural second).
 | | |
 |---|---|
 | **Ollama** | local, no key. Discovered from what you have pulled. |
-| **Anthropic** | Claude, via the official SDK. Curated list, Opus 5 first. |
+| **Claude Code** | your signed-in `claude` CLI — no key. `default` / `opus` / `sonnet` / `haiku`. |
+| **Anthropic** | Claude, via the official SDK. Curated list, Opus 5.5 first. |
 | **OpenAI** / **Google** / **OpenRouter** | discovered from each provider's `/models`. |
 
 `k` on any provider stores an API key in `~/.config/scelo-tui/config.json`
@@ -248,11 +281,23 @@ you type, never printed back, and `x` forgets it. Environment variables
 Anthropic additionally picks up an `ant auth login` profile, so "no key
 stored" does not mean "no access" — the picker probes rather than guessing.
 
+**Claude Code** is the provider the Scelo IDE and the swarm gained in 0.2:
+if `claude` is installed and signed in, it answers with your own Claude
+login and nothing is stored here. Same hardening as the IDE — `--tools ""`
+(the reply cannot touch files), `--strict-mcp-config` (your MCP servers do
+not load into every question), `--no-session-persistence`, and a neutral
+working directory so your data folder's CLAUDE.md never rides along — plus
+one difference: it streams (`stream-json` with partial messages), because a
+pane that sits silent for twenty seconds reads as a hang. Sign-in is checked
+with `claude auth status`, locally, not with a model call.
+`SCELO_CLAUDE_BIN` pins the binary.
+
 The default is `qwen2.5:7b-instruct-q4_K_M`, because three chat panes on one
 screen make latency matter more than prose. That is also why the Claude path
 runs at `effort: "low"` with thinking left on: it is the latency dial, and
 these are terse summarising tasks. Latency, not cost, is the reason — pick
-Opus 5 and it will use Opus 5.
+Opus 5.5 and it will use Opus 5.5. (Haiku 4.5 rejects the effort setting,
+so it is sent without one.)
 
 Whichever provider is selected, if it cannot be reached the pipeline still
 ingests, profiles and cleans; the narrative and the bots go inert and say so,
@@ -275,7 +320,7 @@ A glyph that grows, peaks and shrinks — `✢ ✳ ∗ ✻ ✽ ✻ ∗ ✳` — 
 happening and how long it has taken:
 
 ```
-scelo tui · claude-opus-5 · ✽ understanding the data… 12s
+scelo tui · anthropic/claude-opus-5-5 · ✽ understanding the data… 12s
 │ ✓ read file · 120,000 rows x 32 cols
 │ ✽ understand
 │ · choose analysis
@@ -330,7 +375,9 @@ src/agent/    llm.ts           which model answers; complete + stream
               ollama.ts        local models
               anthropic.ts     Claude, official SDK
               openaiCompat.ts  OpenAI, Gemini, OpenRouter — one wire shape
+              claudeCode.ts    your signed-in claude CLI, streamed
               analyses.ts      the 8-entry menu + column heuristics
+              tables.ts        actuarial tables — suggest, build, the ```table protocol
               pipeline.ts      the automatic run
 src/export/   index.ts         the one-command export (dir and flat layouts)
               handoff.ts       host detection + delivery into RStudio/VS Code/IDE
@@ -381,6 +428,11 @@ If you move the Scelo checkout, update the `file:` path in `package.json`.
 - No swarm.
 - The `.sce` export carries the session one way; the TUI does not OPEN .sce
   files yet.
+- Actuarial tables export as csv and in the `.sce`, but the generated
+  Python / R / notebook do not restate them yet, and a table built with no
+  dataset loaded cannot be exported (export needs a dataset). The IDE's
+  current `parseSce` also drops a `.sce`'s `tables` on open — an IDE-side
+  fix, noted rather than worked around here.
 - Inside the Scelo IDE, the export lands in the workspace but the session
   does not auto-load — the IDE-side terminal listener (read the OSC, parse
   the .sce, restore) is the designed next step; its detection contract

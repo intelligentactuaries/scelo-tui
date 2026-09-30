@@ -21,6 +21,7 @@ policies.scelo-export/
   analysis.R        base R — runs in RStudio with no packages
   policies.xlsx     Excel: summary · results · columns · data
   policies.sce      Scelo IDE project — File → Open picks up where you left
+  table-*.csv       each actuarial table you built, when you built any
 ```
 
 Where that directory goes depends on which terminal you are in. See
@@ -87,6 +88,11 @@ This is the Scelo IDE's actual project format, magic `scelo-project` v1, the sam
 `@scelo/core` dataset shape, tested against the IDE's own parser rather than a
 lookalike. Its activity log carries the load, clean, pick and run steps, so the
 IDE's own export screens can replay them.
+
+It also carries the [actuarial tables](tables.md) you built, in the IDE's own
+`tables` shape with a `table.build` event each, and `wiresVersion: 2`, so the
+IDE reads the empty wiring as "nothing wired" under its 0.2 typed-pin rules
+rather than as an old file to re-wire.
 
 !!! note "One deliberate gap"
     TUI runs map to the catalog's `descriptive` model and the `runs` record

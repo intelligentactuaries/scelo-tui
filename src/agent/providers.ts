@@ -11,9 +11,15 @@
 // actually want. The short list below names the current models with the
 // tradeoff spelled out, which is the thing a picker exists to show.
 
-export type ProviderId = "ollama" | "anthropic" | "openai" | "google" | "openrouter";
+export type ProviderId =
+  | "ollama"
+  | "claude-code"
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "openrouter";
 
-const IDS: ProviderId[] = ["ollama", "anthropic", "openai", "google", "openrouter"];
+const IDS: ProviderId[] = ["ollama", "claude-code", "anthropic", "openai", "google", "openrouter"];
 
 export function isProviderId(v: unknown): v is ProviderId {
   return typeof v === "string" && (IDS as string[]).includes(v);
@@ -42,19 +48,30 @@ export type Provider = {
   models?: ModelOption[];
 };
 
-/** Anthropic's current models. Opus 5 leads because it is the capable
- *  default; the rest are here because a three-pane terminal makes latency
- *  and cost visible in a way a chat window does not, and those are
- *  tradeoffs the user should get to make rather than have made for them.
- *  Fable 5 needs no special handling in anthropic.ts: we never send a
- *  `thinking` param (Fable rejects explicit configs — thinking is always
- *  on), and the refusal fallback regex already covers it. */
+/** Anthropic's current models. Opus 5.5 leads because it is the capable
+ *  default (and cheaper than Opus 5 was); the rest are here because a
+ *  three-pane terminal makes latency and cost visible in a way a chat window
+ *  does not, and those are tradeoffs the user should get to make rather than
+ *  have made for them. Fable 5.1 needs no special handling in anthropic.ts:
+ *  we never send a `thinking` param (Fable rejects explicit configs —
+ *  thinking is always on), and the refusal fallback covers it. */
 const ANTHROPIC_MODELS: ModelOption[] = [
-  { id: "claude-opus-5", note: "most capable · the default" },
-  { id: "claude-fable-5", note: "highest capability tier · 2× opus price, longer turns" },
-  { id: "claude-sonnet-5", note: "near-opus, faster and cheaper" },
+  { id: "claude-opus-5-5", note: "most capable opus · the default" },
+  { id: "claude-fable-5-1", note: "highest capability tier · 2.5× opus price, longer turns" },
+  { id: "claude-sonnet-5-5", note: "near-opus, faster and cheaper" },
   { id: "claude-haiku-4-5", note: "fastest, cheapest" },
-  { id: "claude-opus-4-8", note: "previous opus" },
+  { id: "claude-opus-5", note: "previous opus" },
+];
+
+/** Claude Code takes the CLI's own aliases, which follow whatever Anthropic
+ *  currently ships under each name — so this list cannot go stale the way a
+ *  pinned id does. `default` passes no --model at all: the CLI's own choice,
+ *  which is what the IDE's blank model field means too. */
+const CLAUDE_CODE_MODELS: ModelOption[] = [
+  { id: "default", note: "whatever your claude CLI uses" },
+  { id: "opus", note: "the current opus" },
+  { id: "sonnet", note: "faster, cheaper" },
+  { id: "haiku", note: "fastest" },
 ];
 
 export const PROVIDERS: Provider[] = [
@@ -63,6 +80,13 @@ export const PROVIDERS: Provider[] = [
     label: "OLLAMA",
     where: process.env.SCELO_OLLAMA_URL ?? "http://localhost:11434",
     needsKey: false,
+  },
+  {
+    id: "claude-code",
+    label: "CLAUDE CODE",
+    where: "your claude login · no key",
+    needsKey: false,
+    models: CLAUDE_CODE_MODELS,
   },
   {
     id: "anthropic",
@@ -118,4 +142,5 @@ export type Selection = { provider: ProviderId; model: string };
  *  every provider except Ollama, where the id is just a local tag. */
 export function describe(sel: Selection): string {
   return sel.provider === "ollama" ? sel.model : `${sel.provider}/${sel.model}`;
+
 }

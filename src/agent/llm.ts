@@ -7,6 +7,7 @@
 // rather than as a const.
 
 import { anthropic } from "./anthropic";
+import { claudeCode } from "./claudeCode";
 import { type Config, keyFor, loadConfig } from "./config";
 import { ollama } from "./ollama";
 import { openaiCompat } from "./openaiCompat";
@@ -18,6 +19,7 @@ export type { Selection };
 
 const ADAPTERS: Record<ProviderId, Adapter> = {
   ollama,
+  "claude-code": claudeCode,
   anthropic,
   openai: openaiCompat,
   google: openaiCompat,
@@ -57,7 +59,7 @@ export function setActive(sel: Selection): void {
   active = sel;
 }
 
-/** Header text: `qwen2.5:7b` locally, `anthropic/claude-opus-5` remotely. */
+/** Header text: `qwen2.5:7b` locally, `anthropic/claude-opus-5-5` remotely. */
 export function activeLabel(): string {
   return describe(active);
 }

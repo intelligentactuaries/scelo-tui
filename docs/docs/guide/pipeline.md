@@ -85,7 +85,7 @@ The header carries a glyph that grows, peaks and shrinks, next to the live stage
 name and how long it has been going:
 
 ```text
-scelo tui · claude-opus-5 · ✽ understanding the data… 12s
+scelo tui · anthropic/claude-opus-5-5 · ✽ understanding the data… 12s
 │ ✓ read file · 120,000 rows x 32 cols
 │ ✽ understand
 │ · choose analysis

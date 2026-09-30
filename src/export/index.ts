@@ -8,6 +8,7 @@
 //     analysis.R      base R — runs in RStudio with no packages
 //     <stem>.xlsx     Excel workbook (summary · results · columns · data)
 //     <stem>.sce      Scelo IDE project — File → Open in the IDE
+//     table-*.csv     each actuarial table built this session, when any were
 //
 // The directory is the unit: exporting again overwrites the directory's own
 // artifacts and nothing else. Individual formats are for when you know what
@@ -17,6 +18,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { PipelineResult } from "../agent/pipeline";
+import type { SessionTable } from "../agent/tables";
 import { toCsv } from "./csv";
 import { buildNotebook } from "./notebook";
 import { buildSce, sceFilename, slugify } from "./sce";
@@ -98,6 +100,9 @@ export function exportArtifacts(
     /** Every analysis the session ran, in order. The R script restates all
      *  of them; empty falls back to the pipeline's own chosen analysis. */
     runs?: AnalysisRun[];
+    /** Actuarial tables built this session: a csv each, and the .sce's
+     *  `tables` so the IDE opens them beside the dataset. */
+    tables?: SessionTable[];
   } = {},
 ): ExportOutcome {
   const now = opts.now ?? new Date();
@@ -128,7 +133,21 @@ export function exportArtifacts(
   if (targets.includes("ipynb")) write(name("analysis.ipynb"), buildNotebook(pipe, now, dataFile));
   if (targets.includes("r")) write(name("analysis.R"), buildR(pipe, now, dataFile, opts.runs));
   if (targets.includes("xlsx")) write(`${stem}.xlsx`, buildWorkbook(pipe, now));
-  if (targets.includes("sce")) write(sceFilename(pipe.dataset.name), buildSce(pipe, now));
+  if (targets.includes("sce")) write(sceFilename(pipe.dataset.name), buildSce(pipe, now, opts.tables));
+  // Tables are data, so they travel with the csv target (and with "export
+  // everything"). Named by title, which is what the chat called them.
+  if (targets.includes("csv")) {
+    const used = new Set<string>();
+    for (const t of opts.tables ?? []) {
+      // slugify caps at 60 characters AFTER trimming hyphens (the IDE's
+      // order, kept for .sce parity), so a long title can end on one.
+      const slug = slugify(t.title).replace(/-+$/, "");
+      let n = name(`table-${slug}.csv`);
+      if (used.has(n)) n = name(`table-${slug}-${t.id.split("-").pop()}.csv`);
+      used.add(n);
+      write(n, toCsv(t.dataset));
+    }
+  }
 
   return { dir, files, layout, stem };
 }
