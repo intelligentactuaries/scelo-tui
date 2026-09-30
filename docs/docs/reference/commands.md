@@ -1,6 +1,6 @@
 # Commands
 
-Thirteen of them. **None reach the model**: they are actions rather than
+Fourteen of them. **None reach the model**: they are actions rather than
 conversation, so they keep working when the model is down, slow or
 unconfigured.
 
@@ -17,6 +17,7 @@ pane.
 | [`/list`](#list) | the analyses that apply to this data |
 | [`/charts [number]`](#charts) | every plot this data makes, full screen |
 | [<code>/run &lt;analysis&#124;number&gt;</code>](#run) | switch the analysis |
+| [<code>/tables [number&#124;off]</code>](#tables) | actuarial tables this data suggests, and building one |
 | [`/show <column>`](#show) | one column's profile |
 | [<code>/graph [on&#124;off]</code>](#graph) | the node and edge diagrams in TOOLS and HARD |
 | [<code>/copy [table&#124;reading&#124;reply]</code>](#copy) | put values on the clipboard, no dragging |
@@ -69,6 +70,27 @@ re-renders. The pipeline does not restart and the dataset is not re-read.
 
 Needs an argument, so picking it from the `/` menu completes the line to
 `/run ` and hands it back rather than submitting a usage error.
+
+Ask for an analysis this data cannot feed and it says so, neutrally, with what
+it would need, rather than "no match":
+
+```text
+/run time
+Time profile does not apply to this data — it needs a date column.
+/list shows what does.
+```
+
+That is the Scelo IDE's rule since 0.2: a model whose inputs are absent is
+*not applicable*, which is not a failure and not a typo.
+
+### `/tables`
+
+Opens the actuarial tables this data suggests (a run-off triangle for a claims
+file, model points and a premium grid for a policy file, and so on), plus any
+already built this session. ++enter++ builds or shows one in the HARD pane.
+`/tables 2` builds the second suggestion directly; `/tables off` puts the
+analysis back. See [Actuarial tables](../guide/tables.md) for building them
+by typing the request.
 
 ### `/show`
 

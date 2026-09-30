@@ -28,8 +28,12 @@ specific.
 Combined with `--no-intro`, these make a scripted or kiosk start possible:
 
 ```bash
-SCELO_TUI_MODEL=claude-opus-5 SCELO_TUI_PROVIDER=anthropic scelo book.csv --no-intro
+SCELO_TUI_MODEL=claude-opus-5-5 SCELO_TUI_PROVIDER=anthropic scelo book.csv --no-intro
+SCELO_TUI_MODEL=sonnet SCELO_TUI_PROVIDER=claude-code scelo book.csv --no-intro
 ```
+
+Provider ids: `ollama`, `claude-code`, `anthropic`, `openai`, `google`,
+`openrouter`.
 
 ### API keys
 
@@ -43,7 +47,12 @@ environment.**
 | `GEMINI_API_KEY` | Google |
 | `OPENROUTER_API_KEY` | OpenRouter |
 
-Anthropic additionally picks up an `ant auth login` profile.
+Anthropic additionally picks up an `ant auth login` profile. Claude Code needs
+no key at all: it uses whatever `claude` is signed in with.
+
+| variable | does |
+|---|---|
+| `SCELO_CLAUDE_BIN` | the `claude` binary to use, when it is not the one on `PATH` (the Scelo IDE reads the same variable) |
 
 ### Endpoints
 

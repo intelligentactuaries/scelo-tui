@@ -3,7 +3,8 @@
 | provider | how models are found |
 |---|---|
 | **Ollama** | local, no key. Discovered from what you have pulled. |
-| **Anthropic** | Claude, via the official SDK. Curated list, Opus 5 first. |
+| **Claude Code** | your signed-in `claude` CLI, no key. `default`, `opus`, `sonnet`, `haiku`. |
+| **Anthropic** | Claude, via the official SDK. Curated list, Opus 5.5 first. |
 | **OpenAI** | discovered from the provider's `/models`. |
 | **Google** | same. |
 | **OpenRouter** | same, which covers most of everything else. |
@@ -11,6 +12,31 @@
 The picker **probes rather than guessing**, so "no key stored" does not mean "no
 access": Anthropic also picks up an `ant auth login` profile, and every provider
 is checked against its actual endpoint before the list is drawn.
+
+## Claude Code: your login, no key
+
+If `claude` is installed and signed in, the picker lists **CLAUDE CODE** and it
+just works: nothing to paste, nothing stored. It is the same provider the Scelo
+IDE and the swarm gained in 0.2, run the same careful way:
+
+- the prompt goes in on stdin and the reply streams back as it is written
+  (`--output-format stream-json`), so a pane never sits silent for twenty
+  seconds;
+- `--tools ""` and `--strict-mcp-config`: the reply cannot use tools or touch
+  your files, and your MCP servers do not load into every question;
+- `--no-session-persistence`, and a neutral working directory under the temp
+  dir, so your data folder's `CLAUDE.md` or hooks never ride along and no
+  sessions pile up under `~/.claude`.
+
+The rows are the CLI's own aliases, so they follow whatever Anthropic ships
+under each name. `default` passes no `--model` at all and uses whatever your
+`claude` is set to. The picker checks sign-in with `claude auth status`, which
+answers locally in about a tenth of a second, rather than spending a model call
+every time it opens. Not installed, or signed out, and the row says which.
+
+`SCELO_CLAUDE_BIN` points it at a specific binary; otherwise `PATH` is searched,
+then the places installers put it (`~/.local/bin`, `~/.claude/local`, Homebrew,
+`~/.bun/bin`, `~/.npm-global/bin`).
 
 ## The default, and why
 
@@ -22,8 +48,9 @@ keeps up with you; a frontier model over the network does not, and the tasks
 here are not hard enough to need one.
 
 The same reasoning is why the Claude path runs at `effort: "low"` with thinking
-left on. That is the latency dial, not a cost decision. Pick Opus 5 and it will
-use Opus 5.
+left on. That is the latency dial, not a cost decision. Pick Opus 5.5 and it
+will use Opus 5.5. (Haiku 4.5 does not accept an effort setting, so it is sent
+without one.)
 
 ## API keys
 

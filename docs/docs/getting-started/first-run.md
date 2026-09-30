@@ -19,12 +19,18 @@ you see is what it can actually reach right now.
    gemma3:27b
  ▸ qwen2.5:7b-instruct-q4_K_M · in use
 
+ CLAUDE CODE your claude login · no key · ready
+   default · whatever your claude CLI uses
+   opus · the current opus
+   sonnet · faster, cheaper
+   haiku · fastest
+
  ANTHROPIC claude api · no key
-   claude-opus-5 · most capable · the default
-   claude-fable-5 · highest capability tier · 2× opus price, longer turns
-   claude-sonnet-5 · near-opus, faster and cheaper
+   claude-opus-5-5 · most capable opus · the default
+   claude-fable-5-1 · highest capability tier · 2.5× opus price, longer turns
+   claude-sonnet-5-5 · near-opus, faster and cheaper
    claude-haiku-4-5 · fastest, cheapest
-   claude-opus-4-8 · previous opus
+   claude-opus-5 · previous opus
    no api key — press k · console.anthropic.com → api keys (or run `ant auth login`)
 
  OPENAI api.openai.com · no key

@@ -48,6 +48,21 @@ in the filter instead of running.
 The HARD pane re-renders. The pipeline does not restart, and the dataset is not
 re-read.
 
+## When one does not apply
+
+Every analysis states what it **needs**, the same idea as the `needs` field in
+the Scelo IDE's catalog. Ask for one this data cannot feed and you get that,
+said plainly, instead of "no match":
+
+```text
+/run correlation
+Correlation screen does not apply to this data — it needs at least two numeric
+columns. /list shows what does.
+```
+
+It is not an error. The inputs are simply not there, and the agent never offers
+an analysis the data cannot feed: the menu it chooses from is filtered first.
+
 ## Why only eight
 
 Everything here **profiles and screens**. Model fits, chain-ladder, GLMs,
