@@ -19,7 +19,7 @@ agent does the rest.
 └────────────────────┴────────────────────┴────────────────────┘
 ```
 
-**Status: working prototype.** Drop a file in, the agent profiles, cleans,
+**Status: out of beta.** Drop a file in, the agent profiles, cleans,
 reads and analyses it; steer it in chat; export the session to Python,
 Jupyter, R, Excel and the Scelo IDE in one command.
 

@@ -19,11 +19,10 @@ profiles it, cleans it to a fixed point, reads it, picks an analysis and runs
 it. You steer what it decided from chat. The whole session exports to Python,
 Jupyter, R, Excel and the Scelo IDE in one command.
 
-!!! warning "Open beta"
-    Scelo TUI is a working prototype under active development. It installs from
-    source rather than from a release, the analysis menu is eight entries
-    against the IDE's thirty, and there is no session persistence. See
-    [Limits](reference/limits.md) for the honest list.
+!!! note "Before you start"
+    Scelo TUI installs from source rather than from a release, the analysis
+    menu is eight entries against the IDE's thirty, and there is no session
+    persistence. See [Limits](reference/limits.md) for the full list.
 
 ## What you are looking at
 

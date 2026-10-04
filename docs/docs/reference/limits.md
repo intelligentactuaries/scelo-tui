@@ -1,7 +1,7 @@
 # Limits
 
-Scelo TUI is an open beta. This is the honest list of what it does not do, kept
-here rather than left for you to discover.
+This is the honest list of what Scelo TUI does not do, kept here rather than
+left for you to discover.
 
 ## Scope
 
